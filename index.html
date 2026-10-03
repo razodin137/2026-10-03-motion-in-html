@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SCHEMA — Reel 02 · Postgres vs. the App Layer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   SCHEMA — REEL 02 · "A DATABASE IS NOT AN APPLICATION"
+   Explainer: what a CRM (Twenty) ships that a BaaS / plain Postgres cannot,
+   and how communications data actually lands in the record.
+
+   Render contract (inherited from Reel 01): animation touches transform /
+   opacity only. Two deliberate paint-only exceptions, called out in source:
+     [1] SVG stroke-dashoffset for the schema wire self-draw
+     [2] border-radius morph on the master container
+   No width/height animation anywhere — container morphs are transform-based
+   (translate/scale/rotate) so the 2560x1440 layer never re-lays-out at 60fps.
+   ========================================================================== */
+
+/* 1. TOKENS ---------------------------------------------------------------- */
+:root{
+  --scale:1;
+
+  --ink:#060709;
+  --ink2:#0b0d11;
+  --ink3:#111319;
+  --hi:#f6f7f9;
+  --mid:#9aa3ae;
+  --low:#5f6873;
+  --line:rgba(255,255,255,.09);
+  --line2:rgba(255,255,255,.055);
+  --glass:rgba(255,255,255,.035);
+  --accent:#ff5a1f;          /* Twenty / the active layer */
+  --accent-soft:rgba(255,90,31,.16);
+  --cy:#2ee6d6;              /* Postgres / the data layer */
+  --warn:#ff5470;            /* the tax: what bites you */
+
+  --sans:'Space Grotesk','Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --serif:'Instrument Serif','Playfair Display',Georgia,'Times New Roman',serif;
+  --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace;
+
+  --ease:cubic-bezier(.16,1,.3,1);
+  --ease-io:cubic-bezier(.62,.06,.2,1);
+  --ease-land:cubic-bezier(.2,1.32,.32,1);
+  --ease-out:cubic-bezier(.22,.9,.24,1);
+}
+
+/* 2. BASE ------------------------------------------------------------------ */
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%;margin:0;background:#000;overflow:hidden}
+body{
+  font-family:var(--sans);
+  color:var(--hi);
+  -webkit-font-smoothing:antialiased;
+  text-rendering:geometricPrecision;
+  user-select:none;cursor:none;
+}
+svg{display:block}
+h1,h2,h3,p{margin:0}
+b,strong{font-weight:600}
+
+/* 3. STAGE — hard-locked 2560x1440 ---------------------------------------- */
+.viewport{position:fixed;inset:0;overflow:hidden;background:#000}
+.stage{
+  position:absolute;left:50%;top:50%;
+  margin:-720px 0 0 -1280px;
+  width:2560px;height:1440px;
+  transform:scale(var(--scale));
+  transform-origin:center center;
+  isolation:isolate;
+  overflow:hidden;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #16181f 0%, #0a0b0e 46%, #050608 100%),
+    #050608;
+}
+.stage::before{
+  content:'';position:absolute;inset:-10%;pointer-events:none;
+  background:
+    radial-gradient(38% 42% at 18% 22%, rgba(255,90,31,.13) 0%, rgba(255,90,31,0) 62%),
+    radial-gradient(34% 40% at 84% 74%, rgba(46,230,214,.10) 0%, rgba(46,230,214,0) 64%);
+}
+.stage::after{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:80;
+  background:radial-gradient(72% 68% at 50% 48%, rgba(0,0,0,0) 40%, rgba(0,0,0,.62) 100%);
+}
+
+/* 4. CAMERA RIG ------------------------------------------------------------ */
+.camera{
+  position:absolute;inset:0;
+  perspective:3200px;
+  transform-style:preserve-3d;
+  transition:translate 1.15s var(--ease), scale 1.15s var(--ease), rotate 1.15s var(--ease);
+  will-change:transform;
+}
+.tilt{position:absolute;inset:0;transform-style:preserve-3d;rotate:x 0deg;
+  transition:rotate 1.35s var(--ease)}
+.drifter{
+  position:absolute;inset:0;
+  transform-style:preserve-3d;
+  animation:drift 34s var(--ease-io) infinite alternate;
+  will-change:transform;
+}
+@keyframes drift{
+  0%   {translate:-14px -8px;  rotate:0deg;    scale:1}
+  50%  {translate:6px 4px;     rotate:.26deg;  scale:1.004}
+  100% {translate:16px 10px;   rotate:-.2deg;  scale:1}
+}
+
+/* 5. GRAIN + SCANLINE ------------------------------------------------------ */
+.grain{
+  position:absolute;inset:-8%;z-index:90;pointer-events:none;
+  opacity:.055;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23g)'/%3E%3C/svg%3E");
+  animation:grain 1.1s steps(5) infinite;
+  will-change:transform;
+}
+@keyframes grain{
+  0%{transform:translate3d(0,0,0)}
+  20%{transform:translate3d(-14px,9px,0)}
+  40%{transform:translate3d(11px,-13px,0)}
+  60%{transform:translate3d(-8px,-7px,0)}
+  80%{transform:translate3d(13px,11px,0)}
+  100%{transform:translate3d(0,0,0)}
+}
+.scan{
+  position:absolute;inset:0;z-index:85;pointer-events:none;opacity:.16;
+  background:repeating-linear-gradient(180deg, rgba(255,255,255,.028) 0 1px, rgba(0,0,0,0) 1px 4px);
+}
+
+/* 6. HUD ------------------------------------------------------------------- */
+.hud{position:absolute;z-index:70;display:flex;gap:20px;align-items:center;
+  font-family:var(--mono);font-size:17px;letter-spacing:.16em;text-transform:uppercase;color:var(--low);
+  transition:opacity .7s linear}
+.hud--tl{left:78px;top:66px;flex-direction:column;align-items:flex-start;gap:12px}
+.hud__mark{display:flex;align-items:center;gap:14px;color:var(--hi);font-family:var(--sans);
+  font-weight:600;font-size:22px;letter-spacing:.34em}
+.hud__dot{width:11px;height:11px;border-radius:50%;background:var(--cy);
+  box-shadow:0 0 0 4px rgba(46,230,214,.16),0 0 26px rgba(46,230,214,.75)}
+.hud--bl{left:78px;bottom:64px;gap:16px}
+kbd{
+  font-family:var(--mono);font-size:15px;letter-spacing:.1em;color:var(--hi);
+  border:1px solid var(--line);border-radius:7px;padding:6px 11px;background:rgba(255,255,255,.045);
+  box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 8px 22px rgba(0,0,0,.5)
+}
+.beats{position:absolute;right:78px;top:50%;translate:0 -50%;z-index:70;
+  display:flex;flex-direction:column;gap:13px;align-items:flex-end;font-family:var(--mono)}
+.beat{display:flex;align-items:center;gap:14px;font-size:14px;letter-spacing:.2em;color:var(--low);
+  transition:color .4s var(--ease), opacity .5s linear}
+.beat i{display:block;width:44px;height:2px;background:rgba(255,255,255,.16);border-radius:2px;
+  transform-origin:100% 50%;scale:1 1;transition:scale .55s var(--ease), background .4s linear}
+.beat.on{color:var(--hi)}
+.beat.on i{background:var(--accent);scale:1 2.4;box-shadow:0 0 18px rgba(255,90,31,.6)}
+
+/* 7. MASTER CONTAINER — "one container, never cuts" ------------------------- */
+.shell{
+  position:absolute;inset:0;margin:auto;z-index:10;
+  width:1760px;height:990px;
+  border-radius:26px;
+  overflow:hidden;
+  background:
+    radial-gradient(120% 140% at 12% 0%, rgba(255,255,255,.055) 0%, rgba(255,255,255,0) 55%),
+    rgba(12,14,18,.72);
+  border:1px solid rgba(255,255,255,.10);
+  backdrop-filter:blur(18px) saturate(140%);
+  box-shadow:
+    0 2px 0 rgba(255,255,255,.07) inset,
+    0 -1px 0 rgba(255,255,255,.03) inset,
+    0 40px 90px -20px rgba(0,0,0,.85),
+    0 120px 220px -60px rgba(0,0,0,.95),
+    0 0 0 1px rgba(0,0,0,.6);
+  transition:
+    translate 1.3s var(--ease),
+    scale 1.3s var(--ease),
+    border-radius .9s var(--ease),   /* [2] paint-only */
+    opacity .55s linear,
+    filter .7s var(--ease);
+  will-change:transform;
+}
+.shell__glow{
+  position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:5;
+  box-shadow:0 0 90px 0 rgba(255,90,31,.20) inset;
+  opacity:0;transition:opacity .9s var(--ease);
+}
+.layer{
+  position:absolute;inset:0;
+  opacity:0;filter:blur(12px);translate:0 26px;
+  transition:opacity .42s linear, filter .62s var(--ease), translate .8s var(--ease);
+}
+
+/* 8. BEAT 02 — HERO LAYER -------------------------------------------------- */
+.shell__hero{display:flex;flex-direction:column;justify-content:center;padding:0 130px;gap:40px}
+.hero__eyebrow{
+  display:flex;align-items:center;gap:22px;
+  font-family:var(--mono);font-size:19px;letter-spacing:.32em;text-transform:uppercase;color:var(--mid);
+  clip-path:inset(0 100% 0 0);transition:clip-path 1.05s var(--ease) .06s;
+}
+.hero__eyebrow::after{content:'';flex:1;height:1px;background:var(--line)}
+.hero__title{font-size:132px;line-height:.98;letter-spacing:-.032em;font-weight:600}
+.line{display:block;overflow:hidden;padding:.05em 0 .15em;margin:-.05em 0 -.15em}
+.w{display:inline-block;translate:0 116%;transition:translate 1.02s var(--ease) var(--d,0s)}
+.w--serif{font-family:var(--serif);font-style:italic;font-weight:400;letter-spacing:-.01em;color:var(--accent);
+  padding-right:.08em}
+.hero__body{display:flex;align-items:flex-end;gap:64px;max-width:1520px}
+.hero__copy{font-size:25px;line-height:1.62;color:var(--mid);max-width:760px;
+  border-left:1px solid var(--line);padding-left:34px}
+.hero__copy b{color:var(--hi);font-weight:500}
+.chips{display:flex;flex-direction:column;gap:12px;margin-left:auto;padding-bottom:6px;align-items:flex-end}
+.chip{
+  font-family:var(--mono);font-size:15px;letter-spacing:.16em;padding:12px 18px;border-radius:999px;
+  border:1px solid var(--line);color:var(--mid);background:rgba(255,255,255,.03);white-space:nowrap;
+  opacity:0;translate:0 18px;transition:opacity .5s linear var(--d,0s), translate .7s var(--ease) var(--d,0s)
+}
+.chip b{color:var(--cy);font-weight:500}
+
+/* 9. BEAT 03 — THE CAPABILITY MATRIX -------------------------------------- */
+.shell__matrix{display:flex;flex-direction:column;padding:56px 90px 62px}
+.mx__hd{display:flex;align-items:flex-start;gap:22px;margin-bottom:26px}
+.mx__hd h2{font-size:52px;font-weight:600;letter-spacing:-.03em;line-height:1.06}
+.mx__hd p{font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low);margin-top:12px}
+.pill{margin-left:auto;display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:13px;
+  letter-spacing:.2em;padding:8px 13px;border-radius:999px;border:1px solid rgba(255,90,31,.34);
+  color:var(--accent);background:rgba(255,90,31,.07);white-space:nowrap}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent);
+  animation:pulse 1.9s var(--ease-io) infinite}
+@keyframes pulse{0%,100%{opacity:1;scale:1}50%{opacity:.35;scale:.7}}
+
+.mx__thead,.mx__row{display:grid;grid-template-columns:300px 1fr 1fr;gap:26px}
+.mx__thead{padding:0 0 14px;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:13px;letter-spacing:.22em;color:var(--low)}
+.mx__thead .off{color:var(--low)}
+.mx__thead .on{color:var(--accent)}
+.mx__rows{display:flex;flex-direction:column;flex:1}
+.mx__row{align-items:center;padding:20px 0;border-bottom:1px solid rgba(255,255,255,.045);
+  opacity:0;translate:0 18px;
+  transition:opacity .5s linear var(--d,0s), translate .75s var(--ease) var(--d,0s)}
+.state-3 .mx__row{opacity:1;translate:0 0}
+.mx__label{display:flex;align-items:center;gap:14px;font-size:21px;font-weight:500;
+  color:var(--hi);letter-spacing:-.01em}
+.mx__label i{font-family:var(--mono);font-style:normal;font-size:13px;letter-spacing:.14em;color:var(--low)}
+.mx__cell{display:flex;align-items:flex-start;gap:14px;font-size:20px;line-height:1.4;color:var(--mid)}
+.mx__cell i{flex:0 0 9px;width:9px;height:9px;border-radius:50%;margin-top:9px}
+.mx__cell--off i{background:rgba(255,255,255,.18)}
+.mx__cell--on{color:var(--hi)}
+.mx__cell--on i{background:var(--accent);box-shadow:0 0 16px rgba(255,90,31,.8);scale:0;
+  transition:scale .6s var(--ease-land) calc(var(--d,0s) + .22s)}
+.state-3 .mx__cell--on i{scale:1}
+.mx__verdict{margin-top:auto;padding-top:24px;display:flex;align-items:center;gap:16px;
+  font-size:22px;color:var(--mid)}
+.mx__verdict b{color:var(--accent);font-weight:600;letter-spacing:-.01em}
+.mx__verdict span{font-family:var(--mono);font-size:14px;letter-spacing:.2em;color:var(--low);margin-left:auto}
+
+/* 10. BEAT 05 — THE DIY ICEBERG ------------------------------------------- */
+.shell__trap{display:flex;flex-direction:column;padding:56px 90px 62px}
+.trap__hd h2{font-size:52px;font-weight:600;letter-spacing:-.03em;line-height:1.06}
+.trap__hd p{font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low);margin-top:12px}
+.trap__grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:22px;
+  flex:1;min-height:0;margin:26px 0 24px}
+.tcard{position:relative;border:1px solid var(--line2);border-radius:18px;background:var(--glass);
+  padding:24px 30px 22px;display:flex;flex-direction:column;gap:12px;overflow:hidden;
+  box-shadow:0 30px 60px -34px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.045) inset;
+  opacity:0;translate:0 24px;
+  transition:opacity .5s linear var(--d,0s), translate .85s var(--ease) var(--d,0s)}
+.state-5 .tcard{opacity:1;translate:0 0}
+.tcard::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;
+  background:linear-gradient(180deg,var(--warn),rgba(255,84,112,0));
+  scale:1 0;transform-origin:50% 0;
+  transition:scale .85s var(--ease) calc(var(--d,0s) + .12s)}
+.state-5 .tcard::before{scale:1 1}
+.tcard__n{font-family:var(--mono);font-size:14px;letter-spacing:.24em;color:var(--warn)}
+.tcard h3{font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1.2}
+.tcard p{font-size:18px;line-height:1.55;color:var(--mid)}
+.tcard code{font-family:var(--mono);font-size:15px;color:var(--mid);letter-spacing:.04em;
+  border:1px solid var(--line2);background:rgba(0,0,0,.3);border-radius:8px;padding:8px 12px;
+  align-self:flex-start;margin-top:auto}
+.trap__verdict{display:grid;grid-template-columns:1fr 1fr;gap:22px;
+  font-family:var(--mono);font-size:15px;letter-spacing:.14em;color:var(--low)}
+.trap__verdict span{padding:17px 22px;border-radius:12px;border:1px solid var(--line2);
+  background:rgba(0,0,0,.25)}
+.trap__verdict b{color:var(--cy);font-weight:500;margin-right:8px}
+.trap__verdict .trap__v--warn b{color:var(--accent)}
+
+/* 11. BEAT 06 — THE MIDDLE-GROUND STACK ----------------------------------- */
+.shell__stack{display:flex;flex-direction:column;padding:56px 90px 62px}
+.stack__hd h2{font-size:52px;font-weight:600;letter-spacing:-.03em;line-height:1.06}
+.stack__hd p{font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low);margin-top:12px}
+.flow{position:relative;display:flex;align-items:center;gap:16px;margin:22px 0 24px;
+  padding:16px 22px;border-radius:12px;border:1px solid var(--line2);background:rgba(0,0,0,.28);
+  font-family:var(--mono);font-size:15px;letter-spacing:.16em;color:var(--mid);overflow:hidden}
+.flow em{font-style:normal;color:var(--low)}
+.flow b{color:var(--cy);font-weight:500}
+.flow .pkt{position:absolute;top:50%;left:22px;width:8px;height:8px;margin-top:-4px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 16px rgba(255,90,31,.9);opacity:0}
+.state-6 .flow .pkt{animation:run 3.1s var(--ease-io) infinite}
+@keyframes run{
+  0%{opacity:0;translate:0 0}
+  8%{opacity:1}
+  92%{opacity:1}
+  100%{opacity:0;translate:1500px 0}
+}
+.stack__cols{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;flex:1;min-height:0}
+.lay{position:relative;border:1px solid var(--line2);border-radius:18px;background:var(--glass);
+  padding:26px 28px 22px;display:flex;flex-direction:column;gap:16px;overflow:hidden;
+  box-shadow:0 30px 60px -34px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.045) inset;
+  opacity:0;translate:0 26px;
+  transition:opacity .5s linear var(--d,0s), translate .85s var(--ease) var(--d,0s)}
+.state-6 .lay{opacity:1;translate:0 0}
+.lay__t{font-family:var(--mono);font-size:14px;letter-spacing:.22em;color:var(--low)}
+.lay h3{font-size:30px;font-weight:600;letter-spacing:-.025em}
+.lay h3 em{font-style:normal;color:var(--cy)}
+.lay ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:13px}
+.lay li{position:relative;padding-left:22px;font-size:18px;line-height:1.5;color:var(--mid)}
+.lay li::before{content:'';position:absolute;left:0;top:.55em;width:8px;height:8px;border-radius:2px;
+  background:var(--accent);box-shadow:0 0 14px rgba(255,90,31,.6)}
+.lay li b{color:var(--hi);font-weight:500}
+.lay__foot{margin-top:auto;padding-top:16px;border-top:1px solid var(--line2);
+  font-family:var(--mono);font-size:14px;letter-spacing:.14em;color:var(--low)}
+.stack__verdict{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:24px;
+  font-family:var(--mono);font-size:15px;letter-spacing:.14em;color:var(--low)}
+.stack__verdict span{padding:17px 22px;border-radius:12px;border:1px solid var(--line2);background:rgba(0,0,0,.25)}
+.stack__verdict b{font-weight:500;margin-right:8px;color:var(--cy)}
+.stack__verdict .sv--warn b{color:var(--warn)}
+
+/* 12. BEAT 04 / 07 — FULL-STAGE SCREENS ---------------------------------- */
+.screens{position:absolute;inset:0;z-index:20;perspective:2600px;transform-style:preserve-3d;
+  pointer-events:none;opacity:0;transition:opacity .5s linear}
+.screen{
+  position:absolute;inset:0;margin:auto;border-radius:24px;padding:38px 46px;
+  display:flex;flex-direction:column;gap:22px;
+  background:
+    radial-gradient(130% 120% at 6% 0%, rgba(255,255,255,.07) 0%, rgba(255,255,255,0) 58%),
+    rgba(13,15,20,.86);
+  border:1px solid rgba(255,255,255,.11);
+  box-shadow:0 60px 120px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.08) inset;
+  opacity:0;translate:0 50px;scale:.95;
+  transition:opacity .7s linear, translate 1.2s var(--ease), scale 1.2s var(--ease), filter .8s var(--ease);
+}
+.screen--pipe,.screen--db{width:1560px;height:830px}
+.scr__hd{display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:15px;
+  letter-spacing:.24em;color:var(--mid);text-transform:uppercase}
+.scr__hd svg{width:18px;height:18px;color:var(--accent)}
+.scr__hd span{margin-left:auto;color:var(--low);letter-spacing:.16em}
+
+/* 12a. ingestion pipeline */
+.pipe{display:grid;grid-template-columns:420px 100px 420px 100px 420px;flex:1;min-height:0}
+.pipe__col{position:relative;border:1px solid var(--line2);border-radius:18px;background:var(--glass);
+  padding:24px 28px;display:flex;flex-direction:column;gap:15px;overflow:hidden;
+  opacity:0;translate:0 24px;
+  transition:opacity .5s linear var(--d,0s), translate .85s var(--ease) var(--d,0s)}
+.state-4 .pipe__col{opacity:1;translate:0 0}
+.pipe__k{font-family:var(--mono);font-size:13px;letter-spacing:.24em;color:var(--low)}
+.pipe__col h3{font-size:25px;font-weight:600;letter-spacing:-.02em;line-height:1.22}
+.pipe__col ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:13px}
+.pipe__col li{position:relative;padding-left:22px;font-size:17.5px;line-height:1.5;color:var(--mid)}
+.pipe__col li::before{content:'';position:absolute;left:0;top:.55em;width:8px;height:8px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 14px rgba(255,90,31,.6)}
+.pipe__col--cy li::before{background:var(--cy);box-shadow:0 0 14px rgba(46,230,214,.6)}
+.pipe__col li b{color:var(--hi);font-weight:500}
+.pipe__tag{margin-top:auto;padding-top:14px;border-top:1px solid var(--line2);
+  font-family:var(--mono);font-size:13px;letter-spacing:.14em;color:var(--low)}
+.pipe__wire{position:relative}
+.pipe__wire::before{content:'';position:absolute;left:10px;right:10px;top:50%;height:1px;
+  background:linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.24),rgba(255,255,255,.04))}
+.pipe__wire i{position:absolute;top:50%;left:10px;width:9px;height:9px;margin-top:-4.5px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 16px rgba(255,90,31,.9);opacity:0}
+.state-4 .pipe__wire i{animation:pkt 1.8s var(--ease-io) infinite}
+.state-4 .pipe__wire i:nth-child(2){animation-delay:.6s}
+.state-4 .pipe__wire i:nth-child(3){animation-delay:1.2s}
+@keyframes pkt{0%{opacity:0;translate:0 0}14%{opacity:1}86%{opacity:1}100%{opacity:0;translate:80px 0}}
+.pipe__foot{display:grid;grid-template-columns:repeat(4,1fr);gap:20px}
+.pipe__foot span{font-family:var(--mono);font-size:14px;letter-spacing:.13em;color:var(--low);
+  padding:15px 18px;border-radius:11px;border:1px solid var(--line2);background:rgba(0,0,0,.3)}
+.pipe__foot b{color:var(--cy);font-weight:500;margin-right:7px}
+
+/* 12b. one-postgres schema hub */
+.db{display:grid;grid-template-columns:900px 1fr;gap:36px;flex:1;min-height:0}
+.db__map{position:relative;border:1px solid var(--line2);border-radius:18px;
+  background:rgba(0,0,0,.26);overflow:hidden}
+.db__wires{position:absolute;inset:0;width:100%;height:100%}
+.db__wires line{stroke:rgba(46,230,214,.42);stroke-width:1.5;stroke-dasharray:var(--len,900);stroke-dashoffset:var(--len,900);
+  transition:stroke-dashoffset 1.4s var(--ease) var(--d,0s)}
+.state-7 .db__wires line{stroke-dashoffset:0}
+.db__core{position:absolute;left:50%;top:50%;width:280px;margin:-64px 0 0 -140px;padding:20px 24px;
+  border-radius:16px;border:1px solid rgba(46,230,214,.35);
+  background:linear-gradient(180deg,rgba(46,230,214,.12),rgba(0,0,0,.45));
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  box-shadow:0 0 70px -14px rgba(46,230,214,.55), 0 1px 0 rgba(255,255,255,.07) inset}
+.db__core b{font-family:var(--mono);font-size:25px;letter-spacing:.2em}
+.db__core span{font-family:var(--mono);font-size:13px;letter-spacing:.2em;color:var(--cy)}
+.db__chip{position:absolute;left:50%;top:50%;width:340px;margin:-38px 0 0 -170px;padding:14px 20px;
+  border-radius:13px;border:1px solid var(--line);background:rgba(14,16,21,.94);
+  display:flex;flex-direction:column;gap:5px;translate:var(--x) var(--y);
+  box-shadow:0 26px 50px -32px #000, 0 1px 0 rgba(255,255,255,.05) inset;
+  opacity:0;transition:opacity .5s linear var(--d,0s), translate .9s var(--ease) var(--d,0s)}
+.state-7 .db__chip{opacity:1}
+.db__chip b{font-family:var(--mono);font-size:19px;letter-spacing:.1em;color:var(--hi)}
+.db__chip span{font-size:15px;color:var(--mid);letter-spacing:.01em}
+.db__chip--cy{border-color:rgba(46,230,214,.32)}
+.db__chip--cy b{color:var(--cy)}
+.db__side{display:flex;flex-direction:column;min-width:0}
+.db__k{font-family:var(--mono);font-size:13px;letter-spacing:.22em;color:var(--low);margin-bottom:6px}
+.toolrow{display:flex;align-items:baseline;gap:14px;padding:11px 0;
+  border-bottom:1px solid rgba(255,255,255,.045)}
+.toolrow b{font-size:19px;font-weight:600;min-width:118px;letter-spacing:-.01em}
+.toolrow span{font-size:16.5px;line-height:1.4;color:var(--mid)}
+.toolrow em{font-family:var(--mono);font-style:normal;font-size:12.5px;letter-spacing:.13em;color:var(--cy);
+  margin-left:auto;white-space:nowrap}
+.db__callout{margin-top:auto;border:1px solid rgba(255,90,31,.35);background:rgba(255,90,31,.07);
+  border-radius:14px;padding:18px 20px;font-size:17.5px;line-height:1.5;color:var(--mid)}
+.db__callout b{display:block;font-family:var(--mono);font-size:13px;letter-spacing:.2em;
+  color:var(--accent);margin-bottom:9px;font-weight:500}
+.db__callout code{font-family:var(--mono);color:var(--hi);font-size:15px}
+
+/* 13. BEAT 08 — LOGO LANDING + CTA ---------------------------------------- */
+.logo{
+  position:absolute;inset:0;margin:auto;z-index:30;pointer-events:none;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:32px;
+  opacity:0;scale:.86;filter:blur(16px);
+  transition:opacity .6s linear, scale 1.1s var(--ease-land), filter .8s var(--ease)
+}
+.logo__ring{width:190px;height:190px;position:relative;display:grid;place-items:center}
+.logo__ring svg{position:absolute;inset:0;width:100%;height:100%}
+.logo__ring .spin{animation:spin 22s linear infinite;transform-origin:50% 50%}
+@keyframes spin{to{rotate:360deg}}
+.logo__glow{
+  position:absolute;width:760px;height:760px;border-radius:50%;
+  background:radial-gradient(50% 50% at 50% 50%, rgba(46,230,214,.22) 0%, rgba(46,230,214,0) 66%);
+}
+.logo__word{font-size:186px;font-weight:700;letter-spacing:.14em;line-height:1;text-indent:.14em;
+  text-shadow:0 0 70px rgba(46,230,214,.3)}
+.logo__tag{font-family:var(--serif);font-style:italic;font-size:40px;color:var(--mid);letter-spacing:.01em}
+.cta{
+  margin-top:14px;display:flex;flex-direction:column;align-items:center;gap:26px;
+  opacity:0;translate:0 26px;transition:opacity .6s linear .5s, translate .9s var(--ease) .5s
+}
+.cta__btn{
+  position:relative;display:flex;align-items:center;gap:18px;
+  padding:26px 46px;border-radius:999px;font-size:25px;font-weight:500;letter-spacing:-.01em;
+  background:radial-gradient(120% 200% at 50% 0%, rgba(46,230,214,1) 0%, rgba(15,150,138,1) 100%);
+  color:#03110f;
+  box-shadow:0 0 0 1px rgba(120,255,240,.5), 0 34px 70px -26px rgba(46,230,214,.75), 0 0 110px -12px rgba(46,230,214,.5);
+}
+.cta__btn svg{width:24px;height:24px}
+.cta__meta{display:flex;gap:34px;font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low)}
+.cta__meta b{color:var(--mid);font-weight:400}
+
+/* 14. SIMULATED CURSOR ---------------------------------------------------- */
+.cursor{
+  position:absolute;left:0;top:0;z-index:120;pointer-events:none;
+  transform:translate3d(1290px,900px,0);
+  transition:transform 1.05s var(--ease);
+  will-change:transform;
+}
+.cursor__ring{
+  position:absolute;left:-46px;top:-46px;width:92px;height:92px;border-radius:50%;
+  border:1px solid rgba(255,90,31,.85);opacity:0;scale:.4;
+  transition:opacity .5s linear, scale .5s var(--ease)
+}
+.cursor.press .cursor__ring{opacity:1;scale:1;transition:opacity .08s linear, scale .42s var(--ease-out)}
+.cursor svg{width:38px;height:38px;filter:drop-shadow(0 10px 18px rgba(0,0,0,.9)) drop-shadow(0 0 14px rgba(255,90,31,.5))}
+.cursor__label{
+  position:absolute;left:30px;top:34px;font-family:var(--mono);font-size:13px;letter-spacing:.2em;
+  padding:7px 11px;border-radius:8px;background:rgba(255,90,31,.92);color:#0a0503;font-weight:500;white-space:nowrap
+}
+
+/* ============================================================================
+   15. BEAT STATE MACHINE — body.state-N drives everything
+   ========================================================================== */
+
+/* ---- STATE 01 · BLACKOUT / THE HOOK ------------------------------------- */
+.state-1 .shell{opacity:0;scale:.74;translate:0 90px;filter:blur(14px);border-radius:52px}
+.state-1 .camera{scale:1.06}
+.state-1 .tilt{rotate:x 1.6deg}
+.state-1 .screens,.state-1 .logo{opacity:0}
+.state-1 .hud{opacity:.5}
+
+/* ---- STATE 02 · HERO SNAP-IN ------------------------------------------- */
+.state-2 .shell{opacity:1;scale:1;translate:0 0;filter:none;border-radius:26px}
+.state-2 .camera{scale:1}
+.state-2 .tilt{rotate:x 0deg}
+.state-2 .shell__hero{opacity:1;filter:none;translate:0 0}
+.state-2 .hero__eyebrow{clip-path:inset(0 0 0 0)}
+.state-2 .w{translate:0 0}
+.state-2 .chip{opacity:1;translate:0 0}
+.state-2 .shell__glow{opacity:.5}
+.state-2 .screens,.state-2 .logo{opacity:0}
+
+/* ---- STATE 03 · THE MATRIX -------------------------------------------- */
+.state-3 .shell{opacity:1;scale:1.02;translate:0 0;border-radius:32px;filter:none}
+.state-3 .shell__hero{opacity:0;filter:blur(12px);translate:0 -34px}
+.state-3 .shell__hero .w{translate:0 -116%}
+.state-3 .shell__matrix{opacity:1;filter:none;translate:0 0}
+.state-3 .tilt{rotate:x 0deg}
+.state-3 .screens,.state-3 .logo{opacity:0}
+
+/* ---- STATE 04 · INGESTION PIPELINE (shell recedes, screen flies in) --- */
+.state-4 .shell{opacity:.20;scale:.82;translate:0 34px;filter:blur(3px);border-radius:34px}
+.state-4 .shell__matrix{opacity:1;filter:none;translate:0 0}
+.state-4 .tilt{rotate:x .8deg}
+.state-4 .screens{opacity:1}
+.state-4 .screen--pipe{opacity:1;translate:0 0;scale:1;filter:none}
+.state-4 .logo{opacity:0}
+
+/* ---- STATE 05 · THE DIY ICEBERG --------------------------------------- */
+.state-5 .shell{opacity:1;scale:1.03;translate:0 0;filter:none;border-radius:32px}
+.state-5 .shell__matrix{opacity:0;filter:blur(12px);translate:0 -30px}
+.state-5 .shell__trap{opacity:1;filter:none;translate:0 0}
+.state-5 .tilt{rotate:x 0deg}
+.state-5 .screens{opacity:0}
+.state-5 .screen--pipe{opacity:0;translate:-40px 0;scale:.94;filter:blur(8px)}
+.state-5 .logo{opacity:0}
+
+/* ---- STATE 06 · THE MIDDLE-GROUND STACK ------------------------------- */
+.state-6 .shell{opacity:1;scale:1.01;translate:0 0;filter:none;border-radius:32px}
+.state-6 .shell__trap{opacity:0;filter:blur(12px);translate:0 -30px}
+.state-6 .shell__stack{opacity:1;filter:none;translate:0 0}
+.state-6 .screens,.state-6 .logo{opacity:0}
+
+/* ---- STATE 07 · ONE POSTGRES (shell recedes, schema hub flies in) ----- */
+.state-7 .shell{opacity:.20;scale:.82;translate:0 -30px;filter:blur(3px);border-radius:34px}
+.state-7 .shell__stack{opacity:1;filter:none;translate:0 0}
+.state-7 .tilt{rotate:x -.8deg}
+.state-7 .screens{opacity:1}
+.state-7 .screen--db{opacity:1;translate:0 0;scale:1;filter:none}
+.state-7 .logo{opacity:0}
+
+/* ---- STATE 08 · THE LAND · LOGO + CTA (lingers forever) --------------- */
+.state-8 .shell{opacity:0;scale:.9;translate:0 0;filter:blur(10px)}
+.state-8 .camera{scale:1.02}
+.state-8 .tilt{rotate:x 0deg}
+.state-8 .screens{opacity:0}
+.state-8 .screen--pipe{opacity:0;translate:0 26px;scale:.92}
+.state-8 .screen--db{opacity:0;translate:0 26px;scale:.92}
+.state-8 .logo{opacity:1;scale:1;filter:none}
+.state-8 .cta{opacity:1;translate:0 0}
+.state-8 .hud--bl{opacity:.55}
+.state-8 .beat{opacity:.4}
+.state-8 .beat.on{opacity:1}
+</style>
+</head>
+<body class="state-1">
+
+<div class="viewport">
+  <div class="stage">
+
+    <!-- camera rig: state-driven push/pull on .camera, continuous drift inside -->
+    <div class="camera">
+      <div class="tilt">
+      <div class="drifter">
+
+        <!-- HUD ------------------------------------------------------------------>
+        <header class="hud hud--tl">
+          <div class="hud__mark"><span class="hud__dot"></span>SCHEMA</div>
+          <span style="font-size:15px;letter-spacing:.24em">REEL 02 · POSTGRES VS. THE APP LAYER</span>
+        </header>
+
+        <aside class="beats">
+          <div class="beat on"><span>01</span><i></i></div>
+          <div class="beat"><span>02</span><i></i></div>
+          <div class="beat"><span>03</span><i></i></div>
+          <div class="beat"><span>04</span><i></i></div>
+          <div class="beat"><span>05</span><i></i></div>
+          <div class="beat"><span>06</span><i></i></div>
+          <div class="beat"><span>07</span><i></i></div>
+          <div class="beat"><span>08</span><i></i></div>
+        </aside>
+
+        <footer class="hud hud--bl">
+          <kbd>SPACE</kbd><kbd>→</kbd>
+          <span style="font-size:15px">NEXT</span>
+          <span style="opacity:.4">·</span>
+          <kbd>←</kbd>
+          <span style="font-size:15px">BACK</span>
+          <span style="opacity:.4">·</span>
+          <span style="font-size:15px">CLICK ANYWHERE</span>
+        </footer>
+
+        <!-- MASTER CONTAINER -------------------------------------------------->
+        <main class="shell">
+          <div class="shell__glow"></div>
+
+          <!-- Beat 02 · hero -->
+          <section class="shell__hero layer">
+            <div class="hero__eyebrow">Twenty CRM — what a BaaS never ships</div>
+            <h1 class="hero__title">
+              <span class="line"><span class="w" style="--d:.06s">A</span> <span class="w" style="--d:.10s">database</span> <span class="w" style="--d:.15s">is</span> <span class="w" style="--d:.19s">not</span></span>
+              <span class="line"><span class="w" style="--d:.27s">an</span> <span class="w w--serif" style="--d:.33s">application.</span></span>
+            </h1>
+            <div class="hero__body">
+              <p class="hero__copy">Supabase, Baserow, NocoDB, plain Postgres — all of it is <b>passive infrastructure</b>: a store, some auth, an API, waiting for a frontend you have not written yet. A real CRM is the <b>active half</b>: workers that poll, parse, resolve and link, with a purpose-built front end over the same rows.</p>
+              <div class="chips">
+                <span class="chip" style="--d:.46s"><b>IMAP</b> · <b>SMTP</b> · <b>CALDAV</b></span>
+                <span class="chip" style="--d:.53s"><b>5</b> SCHEMAS, ONE DATABASE</span>
+                <span class="chip" style="--d:.60s"><b>PGVECTOR</b> READY</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Beat 03 · capability matrix -->
+          <section class="shell__matrix layer">
+            <div class="mx__hd">
+              <div>
+                <h2>What the app layer buys you</h2>
+                <p>PASSIVE STORE vs. ACTIVE SYSTEM</p>
+              </div>
+              <div class="pill"><i></i>WORKERS RUNNING</div>
+            </div>
+
+            <div class="mx__thead">
+              <span>CAPABILITY</span>
+              <span class="off">POSTGRES / BAAS — YOU BUILD IT</span>
+              <span class="on">TWENTY CRM — IT IS ALREADY RUNNING</span>
+            </div>
+
+            <div class="mx__rows">
+              <div class="mx__row" style="--d:.10s">
+                <span class="mx__label"><i>01</i>Data ingestion</span>
+                <div class="mx__cell mx__cell--off"><i></i>Waits for your own frontend to POST</div>
+                <div class="mx__cell mx__cell--on"><i></i>Background workers poll IMAP and CalDAV</div>
+              </div>
+              <div class="mx__row" style="--d:.17s">
+                <span class="mx__label"><i>02</i>Email handling</span>
+                <div class="mx__cell mx__cell--off"><i></i>Stores the raw text payload</div>
+                <div class="mx__cell mx__cell--on"><i></i>Parses MIME, dedupes threads, attaches to Contacts</div>
+              </div>
+              <div class="mx__row" style="--d:.24s">
+                <span class="mx__label"><i>03</i>Business logic</span>
+                <div class="mx__cell mx__cell--off"><i></i>Edge functions and triggers you write</div>
+                <div class="mx__cell mx__cell--on"><i></i>Entity relations, duplicate management, lead scoring</div>
+              </div>
+              <div class="mx__row" style="--d:.31s">
+                <span class="mx__label"><i>04</i>Workflows</span>
+                <div class="mx__cell mx__cell--off"><i></i>Every automation hand-rolled</div>
+                <div class="mx__cell mx__cell--on"><i></i>Native trigger-based sequences</div>
+              </div>
+              <div class="mx__row" style="--d:.38s">
+                <span class="mx__label"><i>05</i>Interface</span>
+                <div class="mx__cell mx__cell--off"><i></i>Headless API, generic table views</div>
+                <div class="mx__cell mx__cell--on"><i></i>Kanban pipelines, activity timelines, unified inbox</div>
+              </div>
+            </div>
+
+            <div class="mx__verdict">
+              <b>The database is the easy 10%.</b> The application layer is the product.
+              <span>AND THE LAYER IS WHERE THE MAINTENANCE LIVES</span>
+            </div>
+          </section>
+
+          <!-- Beat 05 · the DIY iceberg -->
+          <section class="shell__trap layer">
+            <div class="trap__hd">
+              <h2>Polling is the tip of the iceberg</h2>
+              <p>THE "I COULD BUILD THIS IN A WEEKEND" TRAP</p>
+            </div>
+
+            <div class="trap__grid">
+              <article class="tcard" style="--d:.10s">
+                <span class="tcard__n">01 · PROTOCOLS</span>
+                <h3>IMAP was not designed for your schema</h3>
+                <p>Raw MIME strings, base64 attachments, chaotic HTML signatures, infinitely nested threads — plus provider rate limits and connections that drop mid-fetch.</p>
+                <code>parse(MIME) → text · parts · thread</code>
+              </article>
+
+              <article class="tcard" style="--d:.18s">
+                <span class="tcard__n">02 · CALENDARS</span>
+                <h3>Recurrence is a state machine</h3>
+                <p>“Every Tuesday, except next Tuesday, which moved to Wednesday.” RRULE parsing, timezone offsets, DST shifts and attendee RSVP states, forever.</p>
+                <code>RRULE · TZID · DST · PARTSTAT</code>
+              </article>
+
+              <article class="tcard" style="--d:.26s">
+                <span class="tcard__n">03 · RESOLUTION</span>
+                <h3>Who is <b>john.doe@</b>…?</h3>
+                <p>Known contact? Known company domain? Auto-create or not? Ignore <b>noreply@</b>, split multi-recipient threads, merge the dupe when he writes from his personal address.</p>
+                <code>match → create → merge → suppress</code>
+              </article>
+
+              <article class="tcard" style="--d:.34s">
+                <span class="tcard__n">04 · THE VIEW</span>
+                <h3>A SQL view is not a timeline</h3>
+                <p>One company record has to interleave emails, meetings, notes and stage changes, chronologically. That needs join logic <em>and</em> a UI layer built for the shape.</p>
+                <code>JOIN ≠ TIMELINE</code>
+              </article>
+            </div>
+
+            <div class="trap__verdict">
+              <span><b>BUILD IT IF</b>you want a static, read-only rolodex</span>
+              <span class="trap__v--warn"><b>USE THE CRM IF</b>you need to act on the data</span>
+            </div>
+          </section>
+
+          <!-- Beat 06 · the middle ground -->
+          <section class="shell__stack layer">
+            <div class="stack__hd">
+              <h2>The middle ground: wire three tools</h2>
+              <p>BASEROW · NOCODB · SUPABASE, GLUED BY AN AUTOMATION TOOL</p>
+            </div>
+
+            <div class="flow">
+              <i class="pkt"></i>
+              <span>IMAP / CALDAV TRIGGER</span><em>→</em><span><b>n8n</b></span><em>→</em>
+              <span>POSTGRES</span><em>→</em><span>NOCODB · BASEROW · RETOOL · APPSMITH</span>
+            </div>
+
+            <div class="stack__cols">
+              <article class="lay" style="--d:.10s">
+                <span class="lay__t">01 · WORKER — SYNC ENGINE</span>
+                <h3>n8n</h3>
+                <ul>
+                  <li><b>IMAP trigger node</b> pulls the mailbox on a schedule</li>
+                  <li>Strips HTML, decodes MIME, normalises the payload</li>
+                  <li>POSTs clean JSON into your tables</li>
+                </ul>
+                <span class="lay__foot">OAUTH TOKENS · RETRIES · THE GLUE</span>
+              </article>
+
+              <article class="lay" style="--d:.18s">
+                <span class="lay__t">02 · BRAIN — DATABASE</span>
+                <h3>Supabase <em>/ NocoDB</em></h3>
+                <ul>
+                  <li>Managed Postgres you can still open with <b>psql</b></li>
+                  <li>REST / GraphQL API and auth, for free</li>
+                  <li>Edge functions and webhooks for incoming mail</li>
+                </ul>
+                <span class="lay__foot">YOUR SCHEMA · YOUR TABLES</span>
+              </article>
+
+              <article class="lay" style="--d:.26s">
+                <span class="lay__t">03 · FACE — THE UI</span>
+                <h3>Retool <em>/ Appsmith</em></h3>
+                <ul>
+                  <li>Drag-and-drop grids, boards and detail views</li>
+                  <li>Bind widgets straight to the database</li>
+                  <li>NocoDB and Baserow's own views get you started</li>
+                </ul>
+                <span class="lay__foot">NO FRONT END FROM SCRATCH</span>
+              </article>
+            </div>
+
+            <div class="stack__verdict">
+              <span><b>+</b>exact schema, no vendor lock-in</span>
+              <span class="sv--warn"><b>−</b>glue-code tax: parser rot, and the timeline stays hard</span>
+            </div>
+          </section>
+        </main>
+
+        <!-- FULL-STAGE SCREENS -------------------------------------------------->
+        <section class="screens">
+
+          <!-- Beat 04 · how the communications data actually gets in -->
+          <article class="screen screen--pipe">
+            <div class="scr__hd">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6.5h18v11H3z"/><path d="M3.6 7 12 13l8.4-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Ingestion <span>NOBODY POSTS TO YOUR API</span>
+            </div>
+
+            <div class="pipe">
+              <div class="pipe__col" style="--d:.10s">
+                <span class="pipe__k">SOURCES</span>
+                <h3>You connect the real provider</h3>
+                <ul>
+                  <li><b>IMAP</b> — the CRM becomes a headless mail client on your Gmail or Outlook account</li>
+                  <li><b>CalDAV</b> — pulls meetings in and writes changes back, bidirectionally</li>
+                </ul>
+                <span class="pipe__tag">GMAIL · OUTLOOK · FASTMAIL</span>
+              </div>
+
+              <div class="pipe__wire"><i></i><i></i><i></i></div>
+
+              <div class="pipe__col pipe__col--cy" style="--d:.18s">
+                <span class="pipe__k">WORKERS</span>
+                <h3>Continuously, in the background</h3>
+                <ul>
+                  <li>Poll on a loop with <b>backoff</b> when a provider rate-limits you</li>
+                  <li>Parse MIME and iCalendar into structured rows</li>
+                  <li>Decode attachments, strip quote chains, dedupe the thread</li>
+                </ul>
+                <span class="pipe__tag">RETRY · BACKOFF · IDEMPOTENT WRITE</span>
+              </div>
+
+              <div class="pipe__wire"><i></i><i></i><i></i></div>
+
+              <div class="pipe__col" style="--d:.26s">
+                <span class="pipe__k">RECORD LINKING</span>
+                <h3>It lands on the right timeline</h3>
+                <ul>
+                  <li>Match sender and recipients against <b>Contact</b>, then <b>Company</b></li>
+                  <li>Auto-create when nothing matches; merge when it should</li>
+                  <li>Filter impersonal addresses so the timeline stays signal</li>
+                </ul>
+                <span class="pipe__tag">ATTACHED · NOT DUMPED IN A TABLE</span>
+              </div>
+            </div>
+
+            <div class="pipe__foot">
+              <span><b>SMTP</b>sends outbound from the CRM</span>
+              <span><b>CALDAV</b>syncs appointments both ways</span>
+              <span><b>DEDUPE</b>threads, not single messages</span>
+              <span><b>FILTER</b>drops noreply@ and support@</span>
+            </div>
+          </article>
+
+          <!-- Beat 07 · one Postgres, one schema per app -->
+          <article class="screen screen--db">
+            <div class="scr__hd">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="6.4" rx="7.4" ry="3.2"/><path d="M4.6 6.4v11.2c0 1.8 3.3 3.2 7.4 3.2s7.4-1.4 7.4-3.2V6.4" stroke-linecap="round"/></svg>
+              One Postgres <span>GOLDEN RULE · ONE APP, ONE SCHEMA</span>
+            </div>
+
+            <div class="db">
+              <div class="db__map">
+                <svg class="db__wires" viewBox="0 0 900 690" preserveAspectRatio="none" aria-hidden="true">
+                  <line class="draw" style="--d:.55s" x1="450" y1="345" x2="450" y2="130"/>
+                  <line class="draw" style="--d:.62s" x1="450" y1="345" x2="182" y2="225"/>
+                  <line class="draw" style="--d:.69s" x1="450" y1="345" x2="182" y2="441"/>
+                  <line class="draw" style="--d:.76s" x1="450" y1="345" x2="718" y2="225"/>
+                  <line class="draw" style="--d:.83s" x1="450" y1="345" x2="718" y2="441"/>
+                </svg>
+
+                <div class="db__core"><b>POSTGRES</b><span>PGVECTOR</span></div>
+
+                <div class="db__chip db__chip--cy" style="--x:0px;--y:-215px;--d:.30s">
+                  <b>communications</b><span>mail + calendar + linked threads</span>
+                </div>
+                <div class="db__chip" style="--x:-268px;--y:-120px;--d:.36s">
+                  <b>listmonk</b><span>newsletters, subscribers, campaigns</span>
+                </div>
+                <div class="db__chip" style="--x:-268px;--y:96px;--d:.42s">
+                  <b>cms</b><span>blogs, notes, todos, drafts</span>
+                </div>
+                <div class="db__chip" style="--x:268px;--y:-120px;--d:.48s">
+                  <b>ai_memory</b><span>chat logs + vector embeddings</span>
+                </div>
+                <div class="db__chip db__chip--cy" style="--x:268px;--y:96px;--d:.54s">
+                  <b>unified</b><span>views that join across all of them</span>
+                </div>
+              </div>
+
+              <aside class="db__side">
+                <span class="db__k">ONE TOOL PER JOB, ALL ON THE SAME DATABASE</span>
+
+                <div class="toolrow"><b>Listmonk</b><span>newsletters</span><em>POSTGRES NATIVE</em></div>
+                <div class="toolrow"><b>Directus</b><span>CMS + instant API over your raw SQL</span><em>MIRRORS SCHEMA</em></div>
+                <div class="toolrow"><b>Cal.com</b><span>“book a time with me” scheduling</span><em>POSTGRES NATIVE</em></div>
+                <div class="toolrow"><b>n8n</b><span>the IMAP / CalDAV worker</span><em>WRITES ROWS</em></div>
+                <div class="toolrow"><b>Umami</b><span>privacy-first analytics on your landing pages</span><em>LINK TO CONTACTS</em></div>
+                <div class="toolrow"><b>Astro</b><span>landing pages rendered from the CMS</span><em>READS THE API</em></div>
+
+                <div class="db__callout">
+                  <b>THE PAYOFF — ONE QUERY, NO GLUE BILL</b>
+                  Contacts who clicked a campaign, emailed you in the last 30 days, and already have an AI-drafted reply. <code>SELECT … FROM unified …</code>
+                </div>
+              </aside>
+            </div>
+          </article>
+        </section>
+
+        <!-- BEAT 08 · logo landing --------------------------------------------->
+        <section class="logo">
+          <div class="logo__glow"></div>
+          <div class="logo__ring">
+            <svg class="spin" viewBox="0 0 190 190" fill="none" aria-hidden="true">
+              <circle cx="95" cy="95" r="86" stroke="rgba(255,255,255,.12)" stroke-width="1"/>
+              <path d="M95 9 A86 86 0 0 1 181 95" stroke="#2ee6d6" stroke-width="2.4" stroke-linecap="round"/>
+              <path d="M9 95 A86 86 0 0 1 95 181" stroke="rgba(255,90,31,.9)" stroke-width="2.4" stroke-linecap="round"/>
+            </svg>
+            <svg viewBox="0 0 190 190" fill="none" aria-hidden="true">
+              <ellipse cx="95" cy="60" rx="36" ry="14" fill="rgba(46,230,214,.16)" stroke="rgba(255,255,255,.55)" stroke-width="2"/>
+              <path d="M59 60v62c0 7.7 16.1 14 36 14s36-6.3 36-14V60" stroke="rgba(255,255,255,.55)" stroke-width="2"/>
+              <path d="M59 91c0 7.7 16.1 14 36 14s36-6.3 36-14" stroke="rgba(255,255,255,.3)" stroke-width="2"/>
+            </svg>
+          </div>
+          <div class="logo__word">SCHEMA</div>
+          <div class="logo__tag">one database, every app</div>
+          <div class="cta">
+            <div class="cta__btn">
+              Start with one table
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <div class="cta__meta">
+              <span>SCHEMA.LOCAL/02</span>
+              <span><b>2560×1440</b></span>
+              <span><b>60 FPS</b></span>
+              <span>REEL 02 · END</span>
+            </div>
+          </div>
+        </section>
+
+        <div class="scan"></div>
+        <div class="grain"></div>
+      </div>
+      </div>
+    </div>
+
+    <!-- simulated high-contrast cursor --------------------------------------->
+    <div class="cursor" id="cursor">
+      <div class="cursor__ring"></div>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 2.6 19.4 11 12 12.6 8.6 20z" fill="#f6f7f9" stroke="#06070a" stroke-width="1.4" stroke-linejoin="round"/>
+      </svg>
+      <div class="cursor__label">CLICK</div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ==========================================================================
+     0. CONFIG
+     ========================================================================== */
+  var TOTAL = 8;
+  var STAGE_W = 2560, STAGE_H = 1440;
+
+  /* Cursor path: one waypoint per beat, in stage coordinates. */
+  var CURSOR = {
+    1: [1290, 900],
+    2: [1980, 900],
+    3: [1830, 700],
+    4: [1700, 1060],
+    5: [800, 900],
+    6: [1814, 640],
+    7: [1750, 1010],
+    8: [1280, 985]
+  };
+
+  var body   = document.body;
+  var beats  = document.querySelectorAll('.beat');
+  var cursor = document.getElementById('cursor');
+
+  var cur = 1;
+
+  /* ==========================================================================
+     1. 1440p CONSTRAINT — the stage is always 2560x1440, only scaled to fit
+     ========================================================================== */
+  function fit() {
+    var s = Math.min(window.innerWidth / STAGE_W, window.innerHeight / STAGE_H);
+    document.documentElement.style.setProperty('--scale', String(s));
+  }
+  fit();
+  window.addEventListener('resize', fit, { passive: true });
+
+  /* ==========================================================================
+     2. SOUND DESIGN — WebAudio synthesis (no assets, no base64 payload)
+        click  : crisp high-frequency transient
+        whoosh : filtered noise sweep for container morphs
+        thump  : sub sine 160Hz -> 36Hz for the logo landing
+     ========================================================================== */
+  var Sfx = (function () {
+    var ctx = null, master = null, noiseBuf = null;
+
+    function ac() {
+      if (!ctx) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = 0.4;
+        var comp = ctx.createDynamicsCompressor();
+        comp.threshold.value = -18; comp.knee.value = 12; comp.ratio.value = 8;
+        master.connect(comp);
+        comp.connect(ctx.destination);
+      }
+      if (ctx.state === 'suspended') ctx.resume();
+      return ctx;
+    }
+
+    function noise(c) {
+      if (noiseBuf) return noiseBuf;
+      var len = Math.floor(c.sampleRate * 1.4);
+      noiseBuf = c.createBuffer(1, len, c.sampleRate);
+      var d = noiseBuf.getChannelData(0), s = 0;
+      for (var i = 0; i < len; i++) {
+        var w = Math.random() * 2 - 1;
+        s = (s + 0.022 * w) / 1.022;
+        d[i] = s * 3.4;
+      }
+      return noiseBuf;
+    }
+
+    function click() {
+      var c = ac(); if (!c) return;
+      var t = c.currentTime;
+
+      var o = c.createOscillator();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(2600, t);
+      o.frequency.exponentialRampToValueAtTime(880, t + 0.035);
+      var g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.42, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+      o.connect(g); g.connect(master);
+      o.start(t); o.stop(t + 0.08);
+
+      var n = c.createBufferSource(); n.buffer = noise(c);
+      var hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3800;
+      var ng = c.createGain();
+      ng.gain.setValueAtTime(0.0001, t);
+      ng.gain.exponentialRampToValueAtTime(0.22, t + 0.002);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+      n.connect(hp); hp.connect(ng); ng.connect(master);
+      n.start(t); n.stop(t + 0.05);
+    }
+
+    function whoosh(reverse) {
+      var c = ac(); if (!c) return;
+      var t = c.currentTime, dur = reverse ? 0.55 : 0.78;
+
+      var n = c.createBufferSource(); n.buffer = noise(c); n.loop = true;
+      var bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.15;
+      if (reverse) {
+        bp.frequency.setValueAtTime(2400, t);
+        bp.frequency.exponentialRampToValueAtTime(240, t + dur);
+      } else {
+        bp.frequency.setValueAtTime(170, t);
+        bp.frequency.exponentialRampToValueAtTime(2700, t + dur * 0.34);
+        bp.frequency.exponentialRampToValueAtTime(400, t + dur);
+      }
+      var g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(reverse ? 0.3 : 0.5, t + 0.09);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+      n.connect(bp); bp.connect(g); g.connect(master);
+      n.start(t); n.stop(t + dur + 0.05);
+    }
+
+    function thump() {
+      var c = ac(); if (!c) return;
+      var t = c.currentTime;
+
+      var o = c.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(168, t);
+      o.frequency.exponentialRampToValueAtTime(36, t + 0.44);
+      var g = c.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.95, t + 0.014);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.62);
+      o.connect(g); g.connect(master);
+      o.start(t); o.stop(t + 0.7);
+
+      var n = c.createBufferSource(); n.buffer = noise(c);
+      var lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+      var ng = c.createGain();
+      ng.gain.setValueAtTime(0.0001, t);
+      ng.gain.exponentialRampToValueAtTime(0.3, t + 0.006);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.19);
+      n.connect(lp); lp.connect(ng); ng.connect(master);
+      n.start(t); n.stop(t + 0.24);
+    }
+
+    return { click: click, whoosh: whoosh, thump: thump };
+  })();
+
+  /* ==========================================================================
+     3. WIRE SELF-DRAW — measure real geometry length, feed --len to CSS
+        (paint-only animation; no reflow, so the render contract holds)
+     ========================================================================== */
+  Array.prototype.forEach.call(
+    document.querySelectorAll('path.draw, line.draw, polyline.draw'),
+    function (p) {
+      var len = 0;
+      try { len = p.getTotalLength(); } catch (e) { len = 0; }
+      if (!len) len = 900;
+      p.style.setProperty('--len', String(Math.ceil(len) + 2));
+    }
+  );
+
+  /* ==========================================================================
+     4. STATE MACHINE
+     ========================================================================== */
+  function setBeats(n) {
+    for (var k = 0; k < beats.length; k++) {
+      beats[k].classList.toggle('on', k + 1 === n);
+    }
+  }
+
+  function press() {
+    cursor.classList.add('press');
+    window.setTimeout(function () { cursor.classList.remove('press'); }, 130);
+  }
+
+  function go(n, via) {
+    var next = Math.max(1, Math.min(TOTAL, n));
+    if (next === cur) return;
+    var forward = next > cur;
+    cur = next;
+
+    for (var k = 1; k <= TOTAL; k++) body.classList.toggle('state-' + k, k === cur);
+    setBeats(cur);
+
+    var p = CURSOR[cur];
+    cursor.style.transform = 'translate3d(' + p[0] + 'px,' + p[1] + 'px,0)';
+
+    /* --- sound design cues --- */
+    if (via !== 'silent') {
+      Sfx.click();
+      if (forward) {
+        if (cur === 2) Sfx.whoosh(false);   // hero snap-in
+        if (cur === 3) Sfx.whoosh(false);   // matrix
+        if (cur === 4) Sfx.whoosh(false);   // pipeline screen
+        if (cur === 6) Sfx.whoosh(false);   // stack
+        if (cur === 7) Sfx.whoosh(false);   // schema hub
+        if (cur === 8) Sfx.thump();         // logo lands
+      } else {
+        Sfx.whoosh(true);
+      }
+      press();
+    }
+  }
+
+  function next() { go(cur + 1); }
+  function prev() { go(cur - 1); }
+
+  /* --- manual playback: SPACE / → / click advance, ← rewinds --- */
+  window.addEventListener('keydown', function (e) {
+    if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+    var k = e.key;
+    if (k === ' ' || k === 'Spacebar' || k === 'ArrowRight' || k === 'Right' ||
+        k === 'ArrowDown' || k === 'PageDown' || k === 'Enter') {
+      e.preventDefault(); next();
+    } else if (k === 'ArrowLeft' || k === 'Left' || k === 'ArrowUp' || k === 'PageUp') {
+      e.preventDefault(); prev();
+    }
+  }, { passive: false });
+
+  window.addEventListener('pointerdown', function (e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    next();
+  });
+
+  /* --- init: put the cursor on the beat-01 waypoint without animating in --- */
+  (function init() {
+    var p = CURSOR[1];
+    cursor.style.transition = 'none';
+    cursor.style.transform = 'translate3d(' + p[0] + 'px,' + p[1] + 'px,0)';
+    void cursor.offsetWidth;   /* force a style flush so the next transform animates */
+    cursor.style.transition = '';
+    setBeats(1);
+    body.classList.add('state-1');
+  })();
+
+  /* expose for verification hooks */
+  window.__reel = { go: go, get state() { return cur; }, total: TOTAL };
+})();
+</script>
+</body>
+</html>
