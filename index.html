@@ -1,1155 +1,1017 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SCHEMA — Reel 02 · Postgres vs. the App Layer</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<title>CADENCE — A Motion Film</title>
+<!--
+  CADENCE — Product Film UI Motion.  8 beats.  Zero dependencies.  Single file.
+  ---------------------------------------------------------------------------
+  PLAYBACK      space / → / click = next    ← = back      1..8 = jump to beat
+                0 = cold open   M = mute   R = reduced motion
+                G = grid guides F = fullscreen   C = hide cursor
+  RENDER CONTRACT
+    Animated properties are transform / opacity / filter / stroke-dashoffset.
+    Only the .morph plate animates box geometry (width, height, border-radius,
+    transform) — the "one container, never cuts" rule requires it. Nothing
+    inside it reflows, and every content element is sized in canvas units.
+  COPY INDEX (replace these strings to retarget the film)
+    b0 cold open    CADENCE · PRESS SPACE TO BEGIN
+    b1 THE PROBLEM  SPEED / ISN'T / FEELING.      "Your product is fast. It still feels dead."
+    b2 THE CAUSE    MOTION IS AN / AFTERTHOUGHT.  "Shipped last. Owned by nobody. Felt by everyone."
+    b3 THE SHIFT    MEET / CADENCE.               dial 0→100 · "One system. Every surface."
+    b4 THE TIMING   SNAP IN. / LAND SOFT.         "240 ms · one curve · every entrance"
+    b5 THE SYSTEM   FOUR PRIMITIVES.              SPRING · STAGGER · EASE · REDUCE
+    b6 THE COMPOUND IT ALL COMPOUNDS.             4 ideas floating in 3D
+    b7 THE IDEA     FEELING IS A FEATURE.         logo lockup + glow
+    b8 THE ASK      START / MOVING.               "SEE IT LIVE" · cadence.design
+-->
 <style>
-/* ============================================================================
-   SCHEMA — REEL 02 · "A DATABASE IS NOT AN APPLICATION"
-   Explainer: what a CRM (Twenty) ships that a BaaS / plain Postgres cannot,
-   and how communications data actually lands in the record.
-
-   Render contract (inherited from Reel 01): animation touches transform /
-   opacity only. Two deliberate paint-only exceptions, called out in source:
-     [1] SVG stroke-dashoffset for the schema wire self-draw
-     [2] border-radius morph on the master container
-   No width/height animation anywhere — container morphs are transform-based
-   (translate/scale/rotate) so the 2560x1440 layer never re-lays-out at 60fps.
-   ========================================================================== */
-
-/* 1. TOKENS ---------------------------------------------------------------- */
+/* ===========================================================================
+   0 · TOKENS
+   =========================================================================== */
 :root{
-  --scale:1;
+  --ink:      #08080A;   /* deep off-black page */
+  --ink-2:    #0E0E11;   /* plate */
+  --ink-3:    #16161A;   /* raised surface */
+  --paper:    #F5F2EB;   /* warm stark white */
+  --dim:      #A9A29A;
+  --mute:     #6C6862;
+  --hair:     rgba(245,242,235,.10);
+  --hair-2:   rgba(245,242,235,.22);
+  --accent:   #FF4A1C;   /* the one accent */
+  --accent-28:rgba(255,74,28,.28);
 
-  --ink:#060709;
-  --ink2:#0b0d11;
-  --ink3:#111319;
-  --hi:#f6f7f9;
-  --mid:#9aa3ae;
-  --low:#5f6873;
-  --line:rgba(255,255,255,.09);
-  --line2:rgba(255,255,255,.055);
-  --glass:rgba(255,255,255,.035);
-  --accent:#ff5a1f;          /* Twenty / the active layer */
-  --accent-soft:rgba(255,90,31,.16);
-  --cy:#2ee6d6;              /* Postgres / the data layer */
-  --warn:#ff5470;            /* the tax: what bites you */
+  --e:        cubic-bezier(.16,1,.3,1);      /* snap in  */
+  --e-cine:   cubic-bezier(.7,0,.2,1);       /* cine     */
+  --e-soft:   cubic-bezier(.25,.8,.25,1);
+  --e-trace:  cubic-bezier(.42,0,.18,1);      /* pen-stroke reveal */
 
-  --sans:'Space Grotesk','Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
-  --serif:'Instrument Serif','Playfair Display',Georgia,'Times New Roman',serif;
-  --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace;
-
-  --ease:cubic-bezier(.16,1,.3,1);
-  --ease-io:cubic-bezier(.62,.06,.2,1);
-  --ease-land:cubic-bezier(.2,1.32,.32,1);
-  --ease-out:cubic-bezier(.22,.9,.24,1);
+  --t-sub:    1.9cqw;
+  --t-micro:  1.05cqw;
+  --pad:      5cqw;
+  --gut:      4.5cqw;    /* canvas gutter — all chrome aligns to this */
 }
-
-/* 2. BASE ------------------------------------------------------------------ */
-*,*::before,*::after{box-sizing:border-box}
-html,body{height:100%;margin:0;background:#000;overflow:hidden}
+*{box-sizing:border-box}
+html,body{height:100%}
 body{
-  font-family:var(--sans);
-  color:var(--hi);
-  -webkit-font-smoothing:antialiased;
-  text-rendering:geometricPrecision;
-  user-select:none;cursor:none;
+  margin:0; background:#030304; color:var(--paper); overflow:hidden;
+  font-family:Inter,"Helvetica Neue",Helvetica,Arial,"Liberation Sans",system-ui,sans-serif;
+  font-synthesis:none; -webkit-font-smoothing:antialiased; text-rendering:geometricPrecision;
+  user-select:none; -webkit-user-select:none;
 }
-svg{display:block}
-h1,h2,h3,p{margin:0}
-b,strong{font-weight:600}
+body.no-cursor,body.no-cursor *{cursor:none}
+::selection{background:var(--accent);color:#fff}
 
-/* 3. STAGE — hard-locked 2560x1440 ---------------------------------------- */
-.viewport{position:fixed;inset:0;overflow:hidden;background:#000}
+/* ===========================================================================
+   1 · VIEWPORT → the letterbox. Camera perspective lives here.
+   =========================================================================== */
+.viewport{
+  position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+  overflow:hidden; background:#030304;
+  perspective:1900px; perspective-origin:50% 46%;
+}
+.viewport::after{               /* cinematic gate + vignette */
+  content:""; position:absolute; inset:0; z-index:8; pointer-events:none;
+  background:radial-gradient(120% 90% at 50% 45%,
+    rgba(0,0,0,0) 44%, rgba(0,0,0,.5) 79%, rgba(0,0,0,.86) 100%);
+  mix-blend-mode:multiply;
+}
+
+/* ===========================================================================
+   2 · STAGE — the fluid cinematic canvas. 16:9, fits any viewport.
+       Container-query host: 1cqw = 1% of canvas width.  Everything derives.
+   =========================================================================== */
 .stage{
-  position:absolute;left:50%;top:50%;
-  margin:-720px 0 0 -1280px;
-  width:2560px;height:1440px;
-  transform:scale(var(--scale));
-  transform-origin:center center;
-  isolation:isolate;
-  overflow:hidden;
-  background:
-    radial-gradient(120% 90% at 50% -10%, #16181f 0%, #0a0b0e 46%, #050608 100%),
-    #050608;
-}
-.stage::before{
-  content:'';position:absolute;inset:-10%;pointer-events:none;
-  background:
-    radial-gradient(38% 42% at 18% 22%, rgba(255,90,31,.13) 0%, rgba(255,90,31,0) 62%),
-    radial-gradient(34% 40% at 84% 74%, rgba(46,230,214,.10) 0%, rgba(46,230,214,0) 64%);
-}
-.stage::after{
-  content:'';position:absolute;inset:0;pointer-events:none;z-index:80;
-  background:radial-gradient(72% 68% at 50% 48%, rgba(0,0,0,0) 40%, rgba(0,0,0,.62) 100%);
+  position:relative;
+  width:min(100vw, 177.7778vh);
+  height:min(100vh, 56.25vw);
+  container-type:size;
+  transform:translateZ(0);
 }
 
-/* 4. CAMERA RIG ------------------------------------------------------------ */
-.camera{
-  position:absolute;inset:0;
-  perspective:3200px;
-  transform-style:preserve-3d;
-  transition:translate 1.15s var(--ease), scale 1.15s var(--ease), rotate 1.15s var(--ease);
-  will-change:transform;
+/* ---- 2a · drifting background light.  transform-only ---- */
+.aura{position:absolute; inset:0; z-index:0; overflow:hidden; pointer-events:none}
+.aura::before,.aura::after{content:""; position:absolute; will-change:transform}
+.aura::before{
+  left:-24cqw; top:-34cqw; width:96cqw; height:96cqw;
+  background:radial-gradient(closest-side, rgba(255,74,28,.17), rgba(255,74,28,.05) 55%, rgba(255,74,28,0) 72%);
+  animation:drift-a 34s var(--e-soft) infinite alternate;
 }
-.tilt{position:absolute;inset:0;transform-style:preserve-3d;rotate:x 0deg;
-  transition:rotate 1.35s var(--ease)}
-.drifter{
-  position:absolute;inset:0;
-  transform-style:preserve-3d;
-  animation:drift 34s var(--ease-io) infinite alternate;
-  will-change:transform;
+.aura::after{
+  right:-30cqw; bottom:-38cqw; width:108cqw; height:108cqw;
+  background:radial-gradient(closest-side, rgba(245,242,235,.075), rgba(245,242,235,0) 66%);
+  animation:drift-b 46s var(--e-soft) infinite alternate;
 }
-@keyframes drift{
-  0%   {translate:-14px -8px;  rotate:0deg;    scale:1}
-  50%  {translate:6px 4px;     rotate:.26deg;  scale:1.004}
-  100% {translate:16px 10px;   rotate:-.2deg;  scale:1}
-}
+@keyframes drift-a{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(9cqw,6cqw,0) scale(1.14)}}
+@keyframes drift-b{from{transform:translate3d(0,0,0) scale(1.06)}to{transform:translate3d(-7cqw,-5cqw,0) scale(1)}}
 
-/* 5. GRAIN + SCANLINE ------------------------------------------------------ */
-.grain{
-  position:absolute;inset:-8%;z-index:90;pointer-events:none;
-  opacity:.055;mix-blend-mode:overlay;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23g)'/%3E%3C/svg%3E");
-  animation:grain 1.1s steps(5) infinite;
-  will-change:transform;
+/* ---- 2b · 12-column guides.  G reveals.  Static paint, zero cost ---- */
+.guides{
+  position:absolute; inset:0 var(--gut); z-index:1; pointer-events:none; opacity:0;
+  transition:opacity .5s var(--e);
+  background-image:linear-gradient(to right, var(--accent-28) 0 1px, transparent 1px);
+  background-size:calc(100% / 12) 100%;
+  box-shadow:inset 1px 0 0 var(--accent-28), inset -1px 0 0 var(--accent-28);
+}
+body.grid .guides{opacity:1}
+
+/* ---- 2c · film grain — SVG turbulence inside a pseudo-element ---- */
+.grain{position:absolute; inset:0; z-index:6; pointer-events:none; overflow:hidden}
+.grain::before{
+  content:""; position:absolute; left:-2%; top:-2%; width:104%; height:104%;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.86' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity:.085; mix-blend-mode:overlay; will-change:transform;
+  animation:grain .62s steps(3,end) infinite;
 }
 @keyframes grain{
-  0%{transform:translate3d(0,0,0)}
-  20%{transform:translate3d(-14px,9px,0)}
-  40%{transform:translate3d(11px,-13px,0)}
-  60%{transform:translate3d(-8px,-7px,0)}
-  80%{transform:translate3d(13px,11px,0)}
-  100%{transform:translate3d(0,0,0)}
-}
-.scan{
-  position:absolute;inset:0;z-index:85;pointer-events:none;opacity:.16;
-  background:repeating-linear-gradient(180deg, rgba(255,255,255,.028) 0 1px, rgba(0,0,0,0) 1px 4px);
+  0%  {transform:translate3d(0,0,0)}
+  33% {transform:translate3d(-1.1%,.7%,0)}
+  66% {transform:translate3d(.8%,-1.2%,0)}
+  100%{transform:translate3d(-.5%,-.4%,0)}
 }
 
-/* 6. HUD ------------------------------------------------------------------- */
-.hud{position:absolute;z-index:70;display:flex;gap:20px;align-items:center;
-  font-family:var(--mono);font-size:17px;letter-spacing:.16em;text-transform:uppercase;color:var(--low);
-  transition:opacity .7s linear}
-.hud--tl{left:78px;top:66px;flex-direction:column;align-items:flex-start;gap:12px}
-.hud__mark{display:flex;align-items:center;gap:14px;color:var(--hi);font-family:var(--sans);
-  font-weight:600;font-size:22px;letter-spacing:.34em}
-.hud__dot{width:11px;height:11px;border-radius:50%;background:var(--cy);
-  box-shadow:0 0 0 4px rgba(46,230,214,.16),0 0 26px rgba(46,230,214,.75)}
-.hud--bl{left:78px;bottom:64px;gap:16px}
-kbd{
-  font-family:var(--mono);font-size:15px;letter-spacing:.1em;color:var(--hi);
-  border:1px solid var(--line);border-radius:7px;padding:6px 11px;background:rgba(255,255,255,.045);
-  box-shadow:0 1px 0 rgba(255,255,255,.05) inset, 0 8px 22px rgba(0,0,0,.5)
+/* ===========================================================================
+   3 · CAMERA + MORPH — dolly, push-in, pull-out.  transform only.
+   =========================================================================== */
+.camera{
+  position:absolute; inset:0; z-index:2;
+  transform-style:preserve-3d;
+  transform:translate3d(0,0,0) scale(1);
+  transition:transform 1.15s var(--e-cine);
+  will-change:transform;
 }
-.beats{position:absolute;right:78px;top:50%;translate:0 -50%;z-index:70;
-  display:flex;flex-direction:column;gap:13px;align-items:flex-end;font-family:var(--mono)}
-.beat{display:flex;align-items:center;gap:14px;font-size:14px;letter-spacing:.2em;color:var(--low);
-  transition:color .4s var(--ease), opacity .5s linear}
-.beat i{display:block;width:44px;height:2px;background:rgba(255,255,255,.16);border-radius:2px;
-  transform-origin:100% 50%;scale:1 1;transition:scale .55s var(--ease), background .4s linear}
-.beat.on{color:var(--hi)}
-.beat.on i{background:var(--accent);scale:1 2.4;box-shadow:0 0 18px rgba(255,90,31,.6)}
-
-/* 7. MASTER CONTAINER — "one container, never cuts" ------------------------- */
-.shell{
-  position:absolute;inset:0;margin:auto;z-index:10;
-  width:1760px;height:990px;
-  border-radius:26px;
-  overflow:hidden;
-  background:
-    radial-gradient(120% 140% at 12% 0%, rgba(255,255,255,.055) 0%, rgba(255,255,255,0) 55%),
-    rgba(12,14,18,.72);
-  border:1px solid rgba(255,255,255,.10);
-  backdrop-filter:blur(18px) saturate(140%);
+/* ONE element, eight geometries — never a cut */
+.morph{
+  position:absolute; inset:0; margin:auto;
+  width:88cqw; height:48cqw;
+  transform-style:preserve-3d;
+  transform:translate3d(0,0,0);
+  transition:width 1.05s var(--e-cine), height 1.05s var(--e-cine),
+             border-radius 1.05s var(--e-cine), transform 1.05s var(--e-cine);
+}
+.morph::before{                 /* the plate: layered elevation + ambient glow */
+  content:""; position:absolute; inset:0; border-radius:inherit;
+  background:var(--ink-2); opacity:0;
   box-shadow:
-    0 2px 0 rgba(255,255,255,.07) inset,
-    0 -1px 0 rgba(255,255,255,.03) inset,
-    0 40px 90px -20px rgba(0,0,0,.85),
-    0 120px 220px -60px rgba(0,0,0,.95),
-    0 0 0 1px rgba(0,0,0,.6);
-  transition:
-    translate 1.3s var(--ease),
-    scale 1.3s var(--ease),
-    border-radius .9s var(--ease),   /* [2] paint-only */
-    opacity .55s linear,
-    filter .7s var(--ease);
-  will-change:transform;
+    0 0 0 1px var(--hair),
+    0 1px 0 0 rgba(245,242,235,.055) inset,
+    0 -1px 0 0 rgba(0,0,0,.55) inset,
+    0 2.4cqw 5cqw -2.4cqw rgba(0,0,0,.82),
+    0 8cqw 15cqw -9cqw rgba(0,0,0,.95),
+    0 0 13cqw -6cqw var(--plate-glow, rgba(255,74,28,0));
+  /* Shadows and fill switch at the state boundary instead of animating: a
+     1.05s box-shadow/background tween repaints this whole plate every frame. */
+  transition:opacity .8s var(--e-cine);
 }
-.shell__glow{
-  position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:5;
-  box-shadow:0 0 90px 0 rgba(255,90,31,.20) inset;
-  opacity:0;transition:opacity .9s var(--ease);
+.morph::after{                  /* inner light sweep — opacity only */
+  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none; opacity:0;
+  background:radial-gradient(90% 120% at 12% 0%, rgba(245,242,235,.07), rgba(245,242,235,0) 58%);
+  transition:opacity .9s var(--e-cine);
 }
+
+/* ===========================================================================
+   4 · LAYERS — one per beat.  Swap = blur + rise.  Never a cut.
+       .fx carries the blur; 3D children live outside it (filters flatten).
+   =========================================================================== */
 .layer{
-  position:absolute;inset:0;
-  opacity:0;filter:blur(12px);translate:0 26px;
-  transition:opacity .42s linear, filter .62s var(--ease), translate .8s var(--ease);
+  position:absolute; inset:0; z-index:3;
+  opacity:0; visibility:hidden; pointer-events:none;
+  transform:translate3d(0,2.4cqw,0);
+  transition:opacity .42s var(--e), transform .8s var(--e), visibility 0s linear .42s;
 }
-
-/* 8. BEAT 02 — HERO LAYER -------------------------------------------------- */
-.shell__hero{display:flex;flex-direction:column;justify-content:center;padding:0 130px;gap:40px}
-.hero__eyebrow{
-  display:flex;align-items:center;gap:22px;
-  font-family:var(--mono);font-size:19px;letter-spacing:.32em;text-transform:uppercase;color:var(--mid);
-  clip-path:inset(0 100% 0 0);transition:clip-path 1.05s var(--ease) .06s;
+.layer.is-live{
+  opacity:1; visibility:visible; transform:translate3d(0,0,0);
+  transition:opacity .5s var(--e), transform 1.05s var(--e), visibility 0s;
 }
-.hero__eyebrow::after{content:'';flex:1;height:1px;background:var(--line)}
-.hero__title{font-size:132px;line-height:.98;letter-spacing:-.032em;font-weight:600}
-.line{display:block;overflow:hidden;padding:.05em 0 .15em;margin:-.05em 0 -.15em}
-.w{display:inline-block;translate:0 116%;transition:translate 1.02s var(--ease) var(--d,0s)}
-.w--serif{font-family:var(--serif);font-style:italic;font-weight:400;letter-spacing:-.01em;color:var(--accent);
-  padding-right:.08em}
-.hero__body{display:flex;align-items:flex-end;gap:64px;max-width:1520px}
-.hero__copy{font-size:25px;line-height:1.62;color:var(--mid);max-width:760px;
-  border-left:1px solid var(--line);padding-left:34px}
-.hero__copy b{color:var(--hi);font-weight:500}
-.chips{display:flex;flex-direction:column;gap:12px;margin-left:auto;padding-bottom:6px;align-items:flex-end}
-.chip{
-  font-family:var(--mono);font-size:15px;letter-spacing:.16em;padding:12px 18px;border-radius:999px;
-  border:1px solid var(--line);color:var(--mid);background:rgba(255,255,255,.03);white-space:nowrap;
-  opacity:0;translate:0 18px;transition:opacity .5s linear var(--d,0s), translate .7s var(--ease) var(--d,0s)
+.fx{position:absolute; inset:0; filter:blur(22px); transition:filter .55s var(--e)}
+.layer.is-live .fx{filter:blur(0px)}
+.body{position:absolute; inset:0; padding:var(--pad)}   /* padded content box */
+
+/* ===========================================================================
+   5 · TYPE
+   =========================================================================== */
+.dt{                            /* display text: draws, then floods with paper */
+  fill:var(--paper); fill-opacity:0;
+  stroke:var(--accent); stroke-width:3; stroke-linecap:round; stroke-linejoin:round;
+  stroke-dasharray:var(--dash,2000); stroke-dashoffset:var(--dash,2000);
+  font-weight:800; letter-spacing:-.03em; paint-order:stroke fill;
+  transition:stroke-dashoffset .45s var(--e), fill-opacity .3s var(--e), stroke-width .6s var(--e);
 }
-.chip b{color:var(--cy);font-weight:500}
-
-/* 9. BEAT 03 — THE CAPABILITY MATRIX -------------------------------------- */
-.shell__matrix{display:flex;flex-direction:column;padding:56px 90px 62px}
-.mx__hd{display:flex;align-items:flex-start;gap:22px;margin-bottom:26px}
-.mx__hd h2{font-size:52px;font-weight:600;letter-spacing:-.03em;line-height:1.06}
-.mx__hd p{font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low);margin-top:12px}
-.pill{margin-left:auto;display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:13px;
-  letter-spacing:.2em;padding:8px 13px;border-radius:999px;border:1px solid rgba(255,90,31,.34);
-  color:var(--accent);background:rgba(255,90,31,.07);white-space:nowrap}
-.pill i{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent);
-  animation:pulse 1.9s var(--ease-io) infinite}
-@keyframes pulse{0%,100%{opacity:1;scale:1}50%{opacity:.35;scale:.7}}
-
-.mx__thead,.mx__row{display:grid;grid-template-columns:300px 1fr 1fr;gap:26px}
-.mx__thead{padding:0 0 14px;border-bottom:1px solid var(--line);
-  font-family:var(--mono);font-size:13px;letter-spacing:.22em;color:var(--low)}
-.mx__thead .off{color:var(--low)}
-.mx__thead .on{color:var(--accent)}
-.mx__rows{display:flex;flex-direction:column;flex:1}
-.mx__row{align-items:center;padding:20px 0;border-bottom:1px solid rgba(255,255,255,.045);
-  opacity:0;translate:0 18px;
-  transition:opacity .5s linear var(--d,0s), translate .75s var(--ease) var(--d,0s)}
-.state-3 .mx__row{opacity:1;translate:0 0}
-.mx__label{display:flex;align-items:center;gap:14px;font-size:21px;font-weight:500;
-  color:var(--hi);letter-spacing:-.01em}
-.mx__label i{font-family:var(--mono);font-style:normal;font-size:13px;letter-spacing:.14em;color:var(--low)}
-.mx__cell{display:flex;align-items:flex-start;gap:14px;font-size:20px;line-height:1.4;color:var(--mid)}
-.mx__cell i{flex:0 0 9px;width:9px;height:9px;border-radius:50%;margin-top:9px}
-.mx__cell--off i{background:rgba(255,255,255,.18)}
-.mx__cell--on{color:var(--hi)}
-.mx__cell--on i{background:var(--accent);box-shadow:0 0 16px rgba(255,90,31,.8);scale:0;
-  transition:scale .6s var(--ease-land) calc(var(--d,0s) + .22s)}
-.state-3 .mx__cell--on i{scale:1}
-.mx__verdict{margin-top:auto;padding-top:24px;display:flex;align-items:center;gap:16px;
-  font-size:22px;color:var(--mid)}
-.mx__verdict b{color:var(--accent);font-weight:600;letter-spacing:-.01em}
-.mx__verdict span{font-family:var(--mono);font-size:14px;letter-spacing:.2em;color:var(--low);margin-left:auto}
-
-/* 10. BEAT 05 — THE DIY ICEBERG ------------------------------------------- */
-.shell__trap{display:flex;flex-direction:column;padding:56px 90px 62px}
-.trap__hd h2{font-size:52px;font-weight:600;letter-spacing:-.03em;line-height:1.06}
-.trap__hd p{font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low);margin-top:12px}
-.trap__grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:22px;
-  flex:1;min-height:0;margin:26px 0 24px}
-.tcard{position:relative;border:1px solid var(--line2);border-radius:18px;background:var(--glass);
-  padding:24px 30px 22px;display:flex;flex-direction:column;gap:12px;overflow:hidden;
-  box-shadow:0 30px 60px -34px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.045) inset;
-  opacity:0;translate:0 24px;
-  transition:opacity .5s linear var(--d,0s), translate .85s var(--ease) var(--d,0s)}
-.state-5 .tcard{opacity:1;translate:0 0}
-.tcard::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;
-  background:linear-gradient(180deg,var(--warn),rgba(255,84,112,0));
-  scale:1 0;transform-origin:50% 0;
-  transition:scale .85s var(--ease) calc(var(--d,0s) + .12s)}
-.state-5 .tcard::before{scale:1 1}
-.tcard__n{font-family:var(--mono);font-size:14px;letter-spacing:.24em;color:var(--warn)}
-.tcard h3{font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1.2}
-.tcard p{font-size:18px;line-height:1.55;color:var(--mid)}
-.tcard code{font-family:var(--mono);font-size:15px;color:var(--mid);letter-spacing:.04em;
-  border:1px solid var(--line2);background:rgba(0,0,0,.3);border-radius:8px;padding:8px 12px;
-  align-self:flex-start;margin-top:auto}
-.trap__verdict{display:grid;grid-template-columns:1fr 1fr;gap:22px;
-  font-family:var(--mono);font-size:15px;letter-spacing:.14em;color:var(--low)}
-.trap__verdict span{padding:17px 22px;border-radius:12px;border:1px solid var(--line2);
-  background:rgba(0,0,0,.25)}
-.trap__verdict b{color:var(--cy);font-weight:500;margin-right:8px}
-.trap__verdict .trap__v--warn b{color:var(--accent)}
-
-/* 11. BEAT 06 — THE MIDDLE-GROUND STACK ----------------------------------- */
-.shell__stack{display:flex;flex-direction:column;padding:56px 90px 62px}
-.stack__hd h2{font-size:52px;font-weight:600;letter-spacing:-.03em;line-height:1.06}
-.stack__hd p{font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low);margin-top:12px}
-.flow{position:relative;display:flex;align-items:center;gap:16px;margin:22px 0 24px;
-  padding:16px 22px;border-radius:12px;border:1px solid var(--line2);background:rgba(0,0,0,.28);
-  font-family:var(--mono);font-size:15px;letter-spacing:.16em;color:var(--mid);overflow:hidden}
-.flow em{font-style:normal;color:var(--low)}
-.flow b{color:var(--cy);font-weight:500}
-.flow .pkt{position:absolute;top:50%;left:22px;width:8px;height:8px;margin-top:-4px;border-radius:50%;
-  background:var(--accent);box-shadow:0 0 16px rgba(255,90,31,.9);opacity:0}
-.state-6 .flow .pkt{animation:run 3.1s var(--ease-io) infinite}
-@keyframes run{
-  0%{opacity:0;translate:0 0}
-  8%{opacity:1}
-  92%{opacity:1}
-  100%{opacity:0;translate:1500px 0}
+.layer.is-live .dt{
+  stroke-dashoffset:0; fill-opacity:1; stroke-width:1.1;
+  transition:
+    stroke-dashoffset 1.15s var(--e-trace) calc(var(--d,0) * 105ms + 90ms),
+    fill-opacity .55s var(--e) calc(var(--d,0) * 105ms + 830ms),
+    stroke-width .8s var(--e) calc(var(--d,0) * 105ms + 1150ms);
 }
-.stack__cols{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;flex:1;min-height:0}
-.lay{position:relative;border:1px solid var(--line2);border-radius:18px;background:var(--glass);
-  padding:26px 28px 22px;display:flex;flex-direction:column;gap:16px;overflow:hidden;
-  box-shadow:0 30px 60px -34px rgba(0,0,0,.95), 0 1px 0 rgba(255,255,255,.045) inset;
-  opacity:0;translate:0 26px;
-  transition:opacity .5s linear var(--d,0s), translate .85s var(--ease) var(--d,0s)}
-.state-6 .lay{opacity:1;translate:0 0}
-.lay__t{font-family:var(--mono);font-size:14px;letter-spacing:.22em;color:var(--low)}
-.lay h3{font-size:30px;font-weight:600;letter-spacing:-.025em}
-.lay h3 em{font-style:normal;color:var(--cy)}
-.lay ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:13px}
-.lay li{position:relative;padding-left:22px;font-size:18px;line-height:1.5;color:var(--mid)}
-.lay li::before{content:'';position:absolute;left:0;top:.55em;width:8px;height:8px;border-radius:2px;
-  background:var(--accent);box-shadow:0 0 14px rgba(255,90,31,.6)}
-.lay li b{color:var(--hi);font-weight:500}
-.lay__foot{margin-top:auto;padding-top:16px;border-top:1px solid var(--line2);
-  font-family:var(--mono);font-size:14px;letter-spacing:.14em;color:var(--low)}
-.stack__verdict{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:24px;
-  font-family:var(--mono);font-size:15px;letter-spacing:.14em;color:var(--low)}
-.stack__verdict span{padding:17px 22px;border-radius:12px;border:1px solid var(--line2);background:rgba(0,0,0,.25)}
-.stack__verdict b{font-weight:500;margin-right:8px;color:var(--cy)}
-.stack__verdict .sv--warn b{color:var(--warn)}
+.tsvg{display:block; height:auto; overflow:visible}
+.t-l{width:43cqw}    /* 3-line hook */
+.t-m{width:56cqw}    /* 2-line hook */
+.t-w{width:80cqw}    /* 1-line statement */
+.t-c{width:52cqw}    /* centred pair */
 
-/* 12. BEAT 04 / 07 — FULL-STAGE SCREENS ---------------------------------- */
-.screens{position:absolute;inset:0;z-index:20;perspective:2600px;transform-style:preserve-3d;
-  pointer-events:none;opacity:0;transition:opacity .5s linear}
-.screen{
-  position:absolute;inset:0;margin:auto;border-radius:24px;padding:38px 46px;
-  display:flex;flex-direction:column;gap:22px;
-  background:
-    radial-gradient(130% 120% at 6% 0%, rgba(255,255,255,.07) 0%, rgba(255,255,255,0) 58%),
-    rgba(13,15,20,.86);
-  border:1px solid rgba(255,255,255,.11);
-  box-shadow:0 60px 120px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.08) inset;
-  opacity:0;translate:0 50px;scale:.95;
-  transition:opacity .7s linear, translate 1.2s var(--ease), scale 1.2s var(--ease), filter .8s var(--ease);
+.sub{margin:0; max-width:44ch; font-size:var(--t-sub); line-height:1.42; font-weight:450;
+  color:var(--dim); letter-spacing:-.01em}
+.micro{font-size:var(--t-micro); font-weight:650; letter-spacing:.26em; text-transform:uppercase; color:var(--mute)}
+.tag{font-size:1.35cqw; font-weight:750; letter-spacing:.16em; text-transform:uppercase; color:var(--accent)}
+.stat{display:flex; align-items:baseline; gap:.5cqw; line-height:.84}
+.stat b{font-size:5.6cqw; font-weight:800; letter-spacing:-.045em; font-variant-numeric:tabular-nums}
+.stat span{font-size:1.4cqw; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--accent)}
+.num-xl{font-size:8.6cqw; font-weight:800; letter-spacing:-.05em; font-variant-numeric:tabular-nums; line-height:.84}
+.rule{height:1px; background:var(--hair-2); transform-origin:left center; transform:scaleX(0);
+  transition:transform 1.1s var(--e) .35s}
+.layer.is-live .rule{transform:scaleX(1)}
+.hair{height:1px; background:var(--hair); flex:1}
+
+.w{display:inline-block; overflow:hidden; vertical-align:top; padding-bottom:.16em; margin-bottom:-.16em}
+.w>i{display:block; font-style:inherit; font-weight:inherit; color:inherit;
+  transform:translate3d(0,118%,0); opacity:.001;
+  transition:transform .8s var(--e), opacity .5s var(--e)}
+.layer.is-live .w>i{transform:translate3d(0,0,0); opacity:1;
+  transition-delay:calc(var(--i,0) * 62ms + 230ms)}
+
+/* ===========================================================================
+   6 · MORPH GEOMETRY + CAMERA PER BEAT
+   =========================================================================== */
+body.state-1 .morph{width:90cqw;  height:50cqw;   border-radius:3cqw; transform:translate3d(0,0,0)}
+body.state-2 .morph{width:92cqw;  height:48cqw;   border-radius:.9cqw;transform:translate3d(-1cqw,0,0)}
+body.state-3 .morph{width:46cqw;  height:46cqw;   border-radius:50%;   transform:translate3d(-17cqw,1cqw,0)}
+body.state-4 .morph{width:88cqw;  height:34cqw;   border-radius:2cqw;  transform:translate3d(0,0,0)}
+body.state-5 .morph{width:92cqw;  height:41cqw;   border-radius:1.6cqw;transform:translate3d(0,0,0)}
+body.state-6 .morph{width:60cqw;  height:30cqw;   border-radius:2.6cqw;transform:translate3d(0,1cqw,0)}
+body.state-7 .morph{width:26cqw;  height:26cqw;   border-radius:50%;   transform:translate3d(0,-1.5cqw,0)}
+body.state-8 .morph{width:100cqw; height:56.25cqw;border-radius:0;     transform:translate3d(0,0,0)}
+
+body.state-1 .morph::before,
+body.state-2 .morph::before,
+body.state-4 .morph::before,
+body.state-5 .morph::before{opacity:1}
+body.state-3 .morph::before{opacity:1; --plate-glow:var(--accent-28)}
+body.state-6 .morph::before{opacity:1; background:#0C0C0F; --plate-glow:rgba(255,74,28,.18)}
+body.state-7 .morph::before{opacity:1; --plate-glow:rgba(255,74,28,.5)}
+body.state-8 .morph::before{opacity:1; background:transparent;
+  box-shadow:0 0 0 1px var(--hair), 0 0 30cqw -10cqw rgba(255,74,28,.28)}
+body.state-2 .morph::after,
+body.state-4 .morph::after,
+body.state-6 .morph::after{opacity:1}
+
+body.state-0 .camera{transform:translate3d(0,2cqw,0) scale(1.16)}
+body.state-1 .camera{transform:translate3d(0,0,0) scale(1)}
+body.state-2 .camera{transform:translate3d(-1.2cqw,0,0) scale(1.03)}
+body.state-3 .camera{transform:translate3d(0,0,0) scale(1.08)}
+body.state-4 .camera{transform:translate3d(1cqw,0,0) rotateX(3.5deg) rotateY(-3deg) scale(1.02)}
+body.state-5 .camera{transform:translate3d(0,0,0) rotateY(4deg) scale(.985)}
+body.state-6 .camera{transform:translate3d(0,0,-6cqw) rotateY(17deg) rotateX(7deg) scale(.88)}
+body.state-7 .camera{transform:translate3d(0,0,0) scale(1.03)}
+body.state-8 .camera{transform:translate3d(0,0,0) scale(1)}
+
+/* ===========================================================================
+   7 · CHROME — broadcast furniture, fixed inside the canvas
+   =========================================================================== */
+.chrome{position:absolute; inset:0; z-index:7; pointer-events:none; font-weight:650;
+  transition:opacity .8s var(--e)}
+.chrome>div{position:absolute}
+body.state-0 .chrome,body.state-8 .chrome{opacity:.55}
+.brand{left:var(--gut); top:3.1cqw; font-size:1.15cqw; letter-spacing:.42em; font-weight:750}
+.brand::after{content:""; display:inline-block; width:.42cqw; height:.42cqw; margin-left:.9cqw;
+  background:var(--accent); border-radius:50%; vertical-align:middle; transform:translateY(-.06cqw)}
+.beat-tag{left:50%; top:3.2cqw; transform:translateX(-50%); font-size:1.02cqw; letter-spacing:.34em;
+  text-transform:uppercase; color:var(--mute)}
+body.state-0 .beat-tag{color:var(--accent)}
+.meter{right:var(--gut); top:2.6cqw; display:flex; align-items:baseline; gap:.55cqw; font-variant-numeric:tabular-nums}
+.meter b{font-size:2.1cqw; font-weight:800; letter-spacing:-.02em}
+.meter em{font-style:normal; font-size:1.05cqw; color:var(--mute); letter-spacing:.14em}
+.track{left:var(--gut); right:var(--gut); bottom:3.1cqw; height:.16cqw; background:var(--hair); overflow:hidden}
+.track i{position:absolute; inset:0; background:var(--accent); transform:scaleX(0); transform-origin:left center;
+  transition:transform .9s var(--e-cine)}
+.ticks{left:var(--gut); right:var(--gut); bottom:3.1cqw; display:flex; justify-content:space-between}
+.ticks i{width:1px; height:.55cqw; background:var(--hair-2); transform:translateY(-.2cqw);
+  transition:background .4s var(--e), transform .5s var(--e)}
+.ticks i.on{background:var(--accent); transform:translateY(-.2cqw) scaleY(1.7)}
+.keys{left:var(--gut); bottom:4.2cqw; font-size:.92cqw; letter-spacing:.2em; text-transform:uppercase; color:var(--mute)}
+.keys b{color:var(--dim); font-weight:700}
+.snd{right:var(--gut); bottom:4.2cqw; font-size:.92cqw; letter-spacing:.2em; text-transform:uppercase; color:var(--mute)}
+body.muted .snd{color:var(--accent)}
+
+/* ===========================================================================
+   8 · COMPONENTS
+   =========================================================================== */
+/* stutter rail — 12 fps on purpose */
+.rail{display:flex; align-items:flex-end; gap:.55cqw; height:8cqw}
+.rail i{width:1.05cqw; height:100%; border-radius:.15cqw; background:var(--ink-3);
+  box-shadow:inset 0 0 0 1px var(--hair); transform-origin:bottom center}
+/* bar field — jank (beat 2) vs smooth (beat 4) */
+.bars{display:flex; align-items:flex-end; gap:.6cqw; height:8cqw}
+.bars i{width:1.1cqw; height:100%; transform-origin:bottom center; transform:scaleY(.15); border-radius:.1cqw}
+.bars.jank i{background:var(--accent); opacity:.5}
+.bars.smooth i{background:var(--paper); opacity:.3}
+.layer.is-live .bars.jank i{animation:jank 1.05s steps(4,end) infinite alternate; animation-delay:calc(var(--i) * -67ms)}
+.layer.is-live .bars.smooth i{animation:jank 1.35s var(--e-soft) infinite alternate; animation-delay:calc(var(--i) * -92ms)}
+@keyframes jank{from{transform:scaleY(.16)}to{transform:scaleY(.94)}}
+
+/* dial (beat 3) — the plate rim itself fills */
+.dial{position:absolute; inset:0; display:block; overflow:visible}
+.dial circle{fill:none; transform-box:fill-box; transform-origin:50% 50%}
+.dial .trk{stroke:var(--hair-2); stroke-width:1.1}
+.dial .fil{stroke:var(--accent); stroke-width:1.4; stroke-linecap:round; transform:rotate(-90deg);
+  stroke-dasharray:100; stroke-dashoffset:100; transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .dial .fil{stroke-dashoffset:0; transition:stroke-dashoffset 1.7s var(--e-cine) .18s}
+.dial-core{position:absolute; inset:20%; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:1cqw; text-align:center}
+
+/* easing curve (beat 4) */
+.curve{position:relative; width:30cqw; height:20cqw}
+.curve svg{position:absolute; inset:0; width:100%; height:100%; overflow:visible}
+.curve .axis{stroke:var(--hair-2); stroke-width:1; fill:none}
+.curve .path{fill:none; stroke:var(--paper); stroke-width:4; stroke-linecap:round;
+  stroke-dasharray:100; stroke-dashoffset:100; transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .curve .path{stroke-dashoffset:0; transition:stroke-dashoffset 1.5s var(--e-cine) .35s}
+.curve .dot{fill:var(--accent); stroke:var(--paper); stroke-width:2.5}
+.layer.is-live .curve .dot{animation:travel 1.9s var(--e-soft) .35s both}
+@keyframes travel{
+  0%   {transform:translate(0,0)}
+  12.5%{transform:translate(26.4px,-7.7px)}
+  25%  {transform:translate(53.9px,-28.1px)}
+  37.5%{transform:translate(83.5px,-57px)}
+  50%  {transform:translate(116.3px,-90px)}
+  62.5%{transform:translate(153.2px,-123.1px)}
+  75%  {transform:translate(195.5px,-151.9px)}
+  87.5%{transform:translate(244px,-172.3px)}
+  100% {transform:translate(300px,-180px)}
 }
-.screen--pipe,.screen--db{width:1560px;height:830px}
-.scr__hd{display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:15px;
-  letter-spacing:.24em;color:var(--mid);text-transform:uppercase}
-.scr__hd svg{width:18px;height:18px;color:var(--accent)}
-.scr__hd span{margin-left:auto;color:var(--low);letter-spacing:.16em}
+.curve .lab{position:absolute; left:0; bottom:-2.6cqw; font-size:1.02cqw; letter-spacing:.28em;
+  text-transform:uppercase; color:var(--mute)}
+.curve-row{display:flex; flex-direction:column; gap:2cqw; align-items:flex-start}
 
-/* 12a. ingestion pipeline */
-.pipe{display:grid;grid-template-columns:420px 100px 420px 100px 420px;flex:1;min-height:0}
-.pipe__col{position:relative;border:1px solid var(--line2);border-radius:18px;background:var(--glass);
-  padding:24px 28px;display:flex;flex-direction:column;gap:15px;overflow:hidden;
-  opacity:0;translate:0 24px;
-  transition:opacity .5s linear var(--d,0s), translate .85s var(--ease) var(--d,0s)}
-.state-4 .pipe__col{opacity:1;translate:0 0}
-.pipe__k{font-family:var(--mono);font-size:13px;letter-spacing:.24em;color:var(--low)}
-.pipe__col h3{font-size:25px;font-weight:600;letter-spacing:-.02em;line-height:1.22}
-.pipe__col ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:13px}
-.pipe__col li{position:relative;padding-left:22px;font-size:17.5px;line-height:1.5;color:var(--mid)}
-.pipe__col li::before{content:'';position:absolute;left:0;top:.55em;width:8px;height:8px;border-radius:50%;
-  background:var(--accent);box-shadow:0 0 14px rgba(255,90,31,.6)}
-.pipe__col--cy li::before{background:var(--cy);box-shadow:0 0 14px rgba(46,230,214,.6)}
-.pipe__col li b{color:var(--hi);font-weight:500}
-.pipe__tag{margin-top:auto;padding-top:14px;border-top:1px solid var(--line2);
-  font-family:var(--mono);font-size:13px;letter-spacing:.14em;color:var(--low)}
-.pipe__wire{position:relative}
-.pipe__wire::before{content:'';position:absolute;left:10px;right:10px;top:50%;height:1px;
-  background:linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.24),rgba(255,255,255,.04))}
-.pipe__wire i{position:absolute;top:50%;left:10px;width:9px;height:9px;margin-top:-4.5px;border-radius:50%;
-  background:var(--accent);box-shadow:0 0 16px rgba(255,90,31,.9);opacity:0}
-.state-4 .pipe__wire i{animation:pkt 1.8s var(--ease-io) infinite}
-.state-4 .pipe__wire i:nth-child(2){animation-delay:.6s}
-.state-4 .pipe__wire i:nth-child(3){animation-delay:1.2s}
-@keyframes pkt{0%{opacity:0;translate:0 0}14%{opacity:1}86%{opacity:1}100%{opacity:0;translate:80px 0}}
-.pipe__foot{display:grid;grid-template-columns:repeat(4,1fr);gap:20px}
-.pipe__foot span{font-family:var(--mono);font-size:14px;letter-spacing:.13em;color:var(--low);
-  padding:15px 18px;border-radius:11px;border:1px solid var(--line2);background:rgba(0,0,0,.3)}
-.pipe__foot b{color:var(--cy);font-weight:500;margin-right:7px}
+/* primitive glyphs (beat 5) */
+.prims{display:grid; grid-template-columns:repeat(4,1fr); gap:2.2cqw; margin-top:2.6cqw}
+.prim{padding-top:1.4cqw; border-top:1px solid var(--hair); display:flex; flex-direction:column; gap:1.2cqw}
+.prim svg{width:4.4cqw; height:4.4cqw; overflow:visible}
+.prim path,.prim circle,.prim line{fill:none; stroke:var(--accent); stroke-width:5.5;
+  stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:100; stroke-dashoffset:100;
+  transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .prim path,.layer.is-live .prim circle,.layer.is-live .prim line{
+  stroke-dashoffset:0; transition:stroke-dashoffset 1.05s var(--e) calc(var(--i) * 130ms + 650ms)}
+.prim b{font-size:1.7cqw; font-weight:800; letter-spacing:-.01em}
+.prim span{font-size:1cqw; color:var(--mute); letter-spacing:.14em; text-transform:uppercase}
+.foot{display:flex; align-items:baseline; gap:1.6cqw; margin-top:auto}
 
-/* 12b. one-postgres schema hub */
-.db{display:grid;grid-template-columns:900px 1fr;gap:36px;flex:1;min-height:0}
-.db__map{position:relative;border:1px solid var(--line2);border-radius:18px;
-  background:rgba(0,0,0,.26);overflow:hidden}
-.db__wires{position:absolute;inset:0;width:100%;height:100%}
-.db__wires line{stroke:rgba(46,230,214,.42);stroke-width:1.5;stroke-dasharray:var(--len,900);stroke-dashoffset:var(--len,900);
-  transition:stroke-dashoffset 1.4s var(--ease) var(--d,0s)}
-.state-7 .db__wires line{stroke-dashoffset:0}
-.db__core{position:absolute;left:50%;top:50%;width:280px;margin:-64px 0 0 -140px;padding:20px 24px;
-  border-radius:16px;border:1px solid rgba(46,230,214,.35);
-  background:linear-gradient(180deg,rgba(46,230,214,.12),rgba(0,0,0,.45));
-  display:flex;flex-direction:column;align-items:center;gap:6px;
-  box-shadow:0 0 70px -14px rgba(46,230,214,.55), 0 1px 0 rgba(255,255,255,.07) inset}
-.db__core b{font-family:var(--mono);font-size:25px;letter-spacing:.2em}
-.db__core span{font-family:var(--mono);font-size:13px;letter-spacing:.2em;color:var(--cy)}
-.db__chip{position:absolute;left:50%;top:50%;width:340px;margin:-38px 0 0 -170px;padding:14px 20px;
-  border-radius:13px;border:1px solid var(--line);background:rgba(14,16,21,.94);
-  display:flex;flex-direction:column;gap:5px;translate:var(--x) var(--y);
-  box-shadow:0 26px 50px -32px #000, 0 1px 0 rgba(255,255,255,.05) inset;
-  opacity:0;transition:opacity .5s linear var(--d,0s), translate .9s var(--ease) var(--d,0s)}
-.state-7 .db__chip{opacity:1}
-.db__chip b{font-family:var(--mono);font-size:19px;letter-spacing:.1em;color:var(--hi)}
-.db__chip span{font-size:15px;color:var(--mid);letter-spacing:.01em}
-.db__chip--cy{border-color:rgba(46,230,214,.32)}
-.db__chip--cy b{color:var(--cy)}
-.db__side{display:flex;flex-direction:column;min-width:0}
-.db__k{font-family:var(--mono);font-size:13px;letter-spacing:.22em;color:var(--low);margin-bottom:6px}
-.toolrow{display:flex;align-items:baseline;gap:14px;padding:11px 0;
-  border-bottom:1px solid rgba(255,255,255,.045)}
-.toolrow b{font-size:19px;font-weight:600;min-width:118px;letter-spacing:-.01em}
-.toolrow span{font-size:16.5px;line-height:1.4;color:var(--mid)}
-.toolrow em{font-family:var(--mono);font-style:normal;font-size:12.5px;letter-spacing:.13em;color:var(--cy);
-  margin-left:auto;white-space:nowrap}
-.db__callout{margin-top:auto;border:1px solid rgba(255,90,31,.35);background:rgba(255,90,31,.07);
-  border-radius:14px;padding:18px 20px;font-size:17.5px;line-height:1.5;color:var(--mid)}
-.db__callout b{display:block;font-family:var(--mono);font-size:13px;letter-spacing:.2em;
-  color:var(--accent);margin-bottom:9px;font-weight:500}
-.db__callout code{font-family:var(--mono);color:var(--hi);font-size:15px}
+/* 3D orbit (beat 6) */
+.orbit{position:absolute; inset:0; transform-style:preserve-3d; transform:translateZ(0)}
+.core{position:absolute; left:50%; top:50%; width:9cqw; height:9cqw; margin:-4.5cqw 0 0 -4.5cqw; border-radius:50%;
+  background:var(--accent); box-shadow:0 0 7cqw -1cqw rgba(255,74,28,.6);
+  animation:pulse 3.4s var(--e-soft) infinite alternate}
+@keyframes pulse{from{transform:scale(.86);opacity:.78}to{transform:scale(1.06);opacity:1}}
+.icard{position:absolute; width:21cqw; padding:1.5cqw 1.6cqw 1.6cqw; border-radius:.9cqw;
+  background:rgba(20,20,24,.94); border-top:2px solid var(--accent);
+  box-shadow:0 2.2cqw 4.5cqw -2.2cqw rgba(0,0,0,.9), inset 0 1px 0 rgba(245,242,235,.06)}
+.icard b{display:block; font-size:1.45cqw; font-weight:800; line-height:1.16; letter-spacing:-.01em}
+.icard span{display:block; margin-top:.6cqw; font-size:.95cqw; color:var(--mute);
+  letter-spacing:.12em; text-transform:uppercase}
+.icard:nth-child(1){left:-11cqw; top:-2.5cqw; animation:f1 11s var(--e-soft) infinite alternate}
+.icard:nth-child(2){left:-8cqw;  bottom:-3.5cqw; animation:f2 13s var(--e-soft) infinite alternate}
+.icard:nth-child(3){right:-11cqw;top:-3.5cqw; animation:f3 12s var(--e-soft) infinite alternate}
+.icard:nth-child(4){right:-8cqw; bottom:-3.5cqw; animation:f4 14s var(--e-soft) infinite alternate}
+@keyframes f1{from{transform:rotateY(23deg) rotateX(5deg) translate3d(0,0,4cqw)}to{transform:rotateY(29deg) rotateX(1deg) translate3d(0,-1.6cqw,8cqw)}}
+@keyframes f2{from{transform:rotateY(19deg) rotateX(-6deg) translate3d(0,0,7cqw)}to{transform:rotateY(24deg) rotateX(-1deg) translate3d(0,1.4cqw,3cqw)}}
+@keyframes f3{from{transform:rotateY(-21deg) rotateX(-4deg) translate3d(0,0,9cqw)}to{transform:rotateY(-27deg) rotateX(2deg) translate3d(0,-1.4cqw,4cqw)}}
+@keyframes f4{from{transform:rotateY(-17deg) rotateX(6deg) translate3d(0,0,3cqw)}to{transform:rotateY(-23deg) rotateX(1deg) translate3d(0,1.6cqw,8cqw)}}
 
-/* 13. BEAT 08 — LOGO LANDING + CTA ---------------------------------------- */
-.logo{
-  position:absolute;inset:0;margin:auto;z-index:30;pointer-events:none;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:32px;
-  opacity:0;scale:.86;filter:blur(16px);
-  transition:opacity .6s linear, scale 1.1s var(--ease-land), filter .8s var(--ease)
-}
-.logo__ring{width:190px;height:190px;position:relative;display:grid;place-items:center}
-.logo__ring svg{position:absolute;inset:0;width:100%;height:100%}
-.logo__ring .spin{animation:spin 22s linear infinite;transform-origin:50% 50%}
-@keyframes spin{to{rotate:360deg}}
-.logo__glow{
-  position:absolute;width:760px;height:760px;border-radius:50%;
-  background:radial-gradient(50% 50% at 50% 50%, rgba(46,230,214,.22) 0%, rgba(46,230,214,0) 66%);
-}
-.logo__word{font-size:186px;font-weight:700;letter-spacing:.14em;line-height:1;text-indent:.14em;
-  text-shadow:0 0 70px rgba(46,230,214,.3)}
-.logo__tag{font-family:var(--serif);font-style:italic;font-size:40px;color:var(--mid);letter-spacing:.01em}
-.cta{
-  margin-top:14px;display:flex;flex-direction:column;align-items:center;gap:26px;
-  opacity:0;translate:0 26px;transition:opacity .6s linear .5s, translate .9s var(--ease) .5s
-}
-.cta__btn{
-  position:relative;display:flex;align-items:center;gap:18px;
-  padding:26px 46px;border-radius:999px;font-size:25px;font-weight:500;letter-spacing:-.01em;
-  background:radial-gradient(120% 200% at 50% 0%, rgba(46,230,214,1) 0%, rgba(15,150,138,1) 100%);
-  color:#03110f;
-  box-shadow:0 0 0 1px rgba(120,255,240,.5), 0 34px 70px -26px rgba(46,230,214,.75), 0 0 110px -12px rgba(46,230,214,.5);
-}
-.cta__btn svg{width:24px;height:24px}
-.cta__meta{display:flex;gap:34px;font-family:var(--mono);font-size:15px;letter-spacing:.22em;color:var(--low)}
-.cta__meta b{color:var(--mid);font-weight:400}
+/* logo lockup (beat 7) */
+.halo{position:absolute; left:50%; top:50%; width:52cqw; height:52cqw; margin:-26cqw 0 0 -26cqw; border-radius:50%;
+  background:radial-gradient(closest-side, rgba(255,74,28,.5), rgba(255,74,28,.08) 58%, rgba(255,74,28,0) 76%);
+  filter:blur(1.2cqw); animation:breathe 5s var(--e-soft) infinite alternate}
+@keyframes breathe{from{transform:scale(.9) translateZ(0);opacity:.5}to{transform:scale(1.07) translateZ(0);opacity:1}}
+.lockmark{position:absolute; left:50%; top:50%; width:11cqw; height:11cqw; margin:-5.5cqw 0 0 -5.5cqw}
+.lockmark svg{width:100%; height:100%; display:block; overflow:visible}
+.lockmark circle,.lockmark path{fill:none; stroke-dasharray:100; stroke-dashoffset:100;
+  transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .lockmark circle{stroke-dashoffset:0; transition:stroke-dashoffset 1.4s var(--e-cine) .1s}
+.layer.is-live .lockmark path{stroke-dashoffset:0; transition:stroke-dashoffset 1.2s var(--e-cine) .35s}
+.lock-word{position:absolute; left:50%; top:calc(50% + 7.4cqw); width:30cqw; margin-left:-15cqw}
+.thesis{position:absolute; left:50%; top:calc(50% + 14cqw); width:40cqw; margin-left:-20cqw; text-align:center}
 
-/* 14. SIMULATED CURSOR ---------------------------------------------------- */
-.cursor{
-  position:absolute;left:0;top:0;z-index:120;pointer-events:none;
-  transform:translate3d(1290px,900px,0);
-  transition:transform 1.05s var(--ease);
-  will-change:transform;
-}
-.cursor__ring{
-  position:absolute;left:-46px;top:-46px;width:92px;height:92px;border-radius:50%;
-  border:1px solid rgba(255,90,31,.85);opacity:0;scale:.4;
-  transition:opacity .5s linear, scale .5s var(--ease)
-}
-.cursor.press .cursor__ring{opacity:1;scale:1;transition:opacity .08s linear, scale .42s var(--ease-out)}
-.cursor svg{width:38px;height:38px;filter:drop-shadow(0 10px 18px rgba(0,0,0,.9)) drop-shadow(0 0 14px rgba(255,90,31,.5))}
-.cursor__label{
-  position:absolute;left:30px;top:34px;font-family:var(--mono);font-size:13px;letter-spacing:.2em;
-  padding:7px 11px;border-radius:8px;background:rgba(255,90,31,.92);color:#0a0503;font-weight:500;white-space:nowrap
-}
+/* CTA (beat 8) */
+.cta{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:2cqw; padding:var(--pad)}
+.cta-btn{display:inline-flex; align-items:center; gap:1.1cqw; padding:1.4cqw 2.7cqw; border-radius:99px;
+  background:var(--accent); color:#180700; font-size:1.45cqw; font-weight:800;
+  letter-spacing:.1em; text-transform:uppercase;
+  box-shadow:0 2.2cqw 4.5cqw -1.8cqw rgba(255,74,28,.55), inset 0 1px 0 rgba(255,255,255,.42);
+  transition:transform .5s var(--e), box-shadow .5s var(--e)}
+.cta-btn:hover{transform:translate3d(0,-.5cqw,0) scale(1.02);
+  box-shadow:0 3.2cqw 5.5cqw -1.8cqw rgba(255,74,28,.7), inset 0 1px 0 rgba(255,255,255,.5)}
+.cta-btn svg{width:1.6cqw; height:1.6cqw}
+.url{font-size:1.45cqw; letter-spacing:.22em; text-transform:uppercase; font-weight:750}
+.url span{color:var(--mute)}
 
-/* ============================================================================
-   15. BEAT STATE MACHINE — body.state-N drives everything
-   ========================================================================== */
+/* cold open (beat 0) */
+.poster{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:2cqw; text-align:center; padding:var(--pad)}
+.poster .mark{font-size:2.4cqw; font-weight:800; letter-spacing:.62em; text-indent:.62em; opacity:.9}
+.poster .go{font-size:1.3cqw; letter-spacing:.44em; text-transform:uppercase; color:var(--accent); font-weight:700}
+.poster .k{font-size:1cqw; letter-spacing:.24em; text-transform:uppercase; color:var(--mute); line-height:2.1}
+.poster .k b{color:var(--dim); font-weight:700}
+.blink{animation:blink 1.7s steps(2,end) infinite}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:.25}}
 
-/* ---- STATE 01 · BLACKOUT / THE HOOK ------------------------------------- */
-.state-1 .shell{opacity:0;scale:.74;translate:0 90px;filter:blur(14px);border-radius:52px}
-.state-1 .camera{scale:1.06}
-.state-1 .tilt{rotate:x 1.6deg}
-.state-1 .screens,.state-1 .logo{opacity:0}
-.state-1 .hud{opacity:.5}
-
-/* ---- STATE 02 · HERO SNAP-IN ------------------------------------------- */
-.state-2 .shell{opacity:1;scale:1;translate:0 0;filter:none;border-radius:26px}
-.state-2 .camera{scale:1}
-.state-2 .tilt{rotate:x 0deg}
-.state-2 .shell__hero{opacity:1;filter:none;translate:0 0}
-.state-2 .hero__eyebrow{clip-path:inset(0 0 0 0)}
-.state-2 .w{translate:0 0}
-.state-2 .chip{opacity:1;translate:0 0}
-.state-2 .shell__glow{opacity:.5}
-.state-2 .screens,.state-2 .logo{opacity:0}
-
-/* ---- STATE 03 · THE MATRIX -------------------------------------------- */
-.state-3 .shell{opacity:1;scale:1.02;translate:0 0;border-radius:32px;filter:none}
-.state-3 .shell__hero{opacity:0;filter:blur(12px);translate:0 -34px}
-.state-3 .shell__hero .w{translate:0 -116%}
-.state-3 .shell__matrix{opacity:1;filter:none;translate:0 0}
-.state-3 .tilt{rotate:x 0deg}
-.state-3 .screens,.state-3 .logo{opacity:0}
-
-/* ---- STATE 04 · INGESTION PIPELINE (shell recedes, screen flies in) --- */
-.state-4 .shell{opacity:.20;scale:.82;translate:0 34px;filter:blur(3px);border-radius:34px}
-.state-4 .shell__matrix{opacity:1;filter:none;translate:0 0}
-.state-4 .tilt{rotate:x .8deg}
-.state-4 .screens{opacity:1}
-.state-4 .screen--pipe{opacity:1;translate:0 0;scale:1;filter:none}
-.state-4 .logo{opacity:0}
-
-/* ---- STATE 05 · THE DIY ICEBERG --------------------------------------- */
-.state-5 .shell{opacity:1;scale:1.03;translate:0 0;filter:none;border-radius:32px}
-.state-5 .shell__matrix{opacity:0;filter:blur(12px);translate:0 -30px}
-.state-5 .shell__trap{opacity:1;filter:none;translate:0 0}
-.state-5 .tilt{rotate:x 0deg}
-.state-5 .screens{opacity:0}
-.state-5 .screen--pipe{opacity:0;translate:-40px 0;scale:.94;filter:blur(8px)}
-.state-5 .logo{opacity:0}
-
-/* ---- STATE 06 · THE MIDDLE-GROUND STACK ------------------------------- */
-.state-6 .shell{opacity:1;scale:1.01;translate:0 0;filter:none;border-radius:32px}
-.state-6 .shell__trap{opacity:0;filter:blur(12px);translate:0 -30px}
-.state-6 .shell__stack{opacity:1;filter:none;translate:0 0}
-.state-6 .screens,.state-6 .logo{opacity:0}
-
-/* ---- STATE 07 · ONE POSTGRES (shell recedes, schema hub flies in) ----- */
-.state-7 .shell{opacity:.20;scale:.82;translate:0 -30px;filter:blur(3px);border-radius:34px}
-.state-7 .shell__stack{opacity:1;filter:none;translate:0 0}
-.state-7 .tilt{rotate:x -.8deg}
-.state-7 .screens{opacity:1}
-.state-7 .screen--db{opacity:1;translate:0 0;scale:1;filter:none}
-.state-7 .logo{opacity:0}
-
-/* ---- STATE 08 · THE LAND · LOGO + CTA (lingers forever) --------------- */
-.state-8 .shell{opacity:0;scale:.9;translate:0 0;filter:blur(10px)}
-.state-8 .camera{scale:1.02}
-.state-8 .tilt{rotate:x 0deg}
-.state-8 .screens{opacity:0}
-.state-8 .screen--pipe{opacity:0;translate:0 26px;scale:.92}
-.state-8 .screen--db{opacity:0;translate:0 26px;scale:.92}
-.state-8 .logo{opacity:1;scale:1;filter:none}
-.state-8 .cta{opacity:1;translate:0 0}
-.state-8 .hud--bl{opacity:.55}
-.state-8 .beat{opacity:.4}
-.state-8 .beat.on{opacity:1}
+/* ===========================================================================
+   9 · REDUCED MOTION — honest, and demoable live with R
+   =========================================================================== */
+body.reduced .aura::before,body.reduced .aura::after,body.reduced .grain::before,
+body.reduced .bars i,body.reduced .halo,body.reduced .core,
+body.reduced .icard,body.reduced .blink{animation:none!important}
+body.reduced *{transition-duration:.2s!important;transition-delay:0s!important}
+body.reduced .fx{filter:none!important}
+body.reduced .dt{stroke-dashoffset:0!important;fill-opacity:1!important;stroke-width:1.1!important}
+body.reduced .w>i{transform:none!important;opacity:1!important}
+body.reduced .rule{transform:scaleX(1)!important}
+body.reduced .dial .fil{stroke-dashoffset:0!important}
+body.reduced .curve .path{stroke-dashoffset:0!important}
+body.reduced .prim path,body.reduced .prim circle,body.reduced .prim line{stroke-dashoffset:0!important}
+body.reduced .lockmark circle,body.reduced .lockmark path{stroke-dashoffset:0!important}
 </style>
 </head>
-<body class="state-1">
+<body class="state-0">
 
 <div class="viewport">
-  <div class="stage">
+  <div class="stage" id="stage">
 
-    <!-- camera rig: state-driven push/pull on .camera, continuous drift inside -->
-    <div class="camera">
-      <div class="tilt">
-      <div class="drifter">
+    <div class="aura" aria-hidden="true"></div>
+    <div class="guides" aria-hidden="true"></div>
 
-        <!-- HUD ------------------------------------------------------------------>
-        <header class="hud hud--tl">
-          <div class="hud__mark"><span class="hud__dot"></span>SCHEMA</div>
-          <span style="font-size:15px;letter-spacing:.24em">REEL 02 · POSTGRES VS. THE APP LAYER</span>
-        </header>
+    <div class="camera" id="camera">
+      <div class="morph" id="morph">
 
-        <aside class="beats">
-          <div class="beat on"><span>01</span><i></i></div>
-          <div class="beat"><span>02</span><i></i></div>
-          <div class="beat"><span>03</span><i></i></div>
-          <div class="beat"><span>04</span><i></i></div>
-          <div class="beat"><span>05</span><i></i></div>
-          <div class="beat"><span>06</span><i></i></div>
-          <div class="beat"><span>07</span><i></i></div>
-          <div class="beat"><span>08</span><i></i></div>
-        </aside>
-
-        <footer class="hud hud--bl">
-          <kbd>SPACE</kbd><kbd>→</kbd>
-          <span style="font-size:15px">NEXT</span>
-          <span style="opacity:.4">·</span>
-          <kbd>←</kbd>
-          <span style="font-size:15px">BACK</span>
-          <span style="opacity:.4">·</span>
-          <span style="font-size:15px">CLICK ANYWHERE</span>
-        </footer>
-
-        <!-- MASTER CONTAINER -------------------------------------------------->
-        <main class="shell">
-          <div class="shell__glow"></div>
-
-          <!-- Beat 02 · hero -->
-          <section class="shell__hero layer">
-            <div class="hero__eyebrow">Twenty CRM — what a BaaS never ships</div>
-            <h1 class="hero__title">
-              <span class="line"><span class="w" style="--d:.06s">A</span> <span class="w" style="--d:.10s">database</span> <span class="w" style="--d:.15s">is</span> <span class="w" style="--d:.19s">not</span></span>
-              <span class="line"><span class="w" style="--d:.27s">an</span> <span class="w w--serif" style="--d:.33s">application.</span></span>
-            </h1>
-            <div class="hero__body">
-              <p class="hero__copy">Supabase, Baserow, NocoDB, plain Postgres — all of it is <b>passive infrastructure</b>: a store, some auth, an API, waiting for a frontend you have not written yet. A real CRM is the <b>active half</b>: workers that poll, parse, resolve and link, with a purpose-built front end over the same rows.</p>
-              <div class="chips">
-                <span class="chip" style="--d:.46s"><b>IMAP</b> · <b>SMTP</b> · <b>CALDAV</b></span>
-                <span class="chip" style="--d:.53s"><b>5</b> SCHEMAS, ONE DATABASE</span>
-                <span class="chip" style="--d:.60s"><b>PGVECTOR</b> READY</span>
+        <!-- ══ 0 · COLD OPEN ══════════════════════════════════════════════ -->
+        <div class="layer is-live" data-beat="0">
+          <div class="fx">
+            <div class="poster">
+              <div class="mark">CADENCE</div>
+              <div class="hair" style="width:22cqw"></div>
+              <div class="go blink">Press space to begin</div>
+              <div class="k">
+                <b>space</b> / <b>→</b> / click &nbsp;advance &nbsp;·&nbsp; <b>←</b> back &nbsp;·&nbsp; <b>1–8</b> jump<br>
+                <b>0</b> cold open &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; <b>R</b> reduced motion &nbsp;·&nbsp;
+                <b>G</b> grid &nbsp;·&nbsp; <b>F</b> fullscreen &nbsp;·&nbsp; <b>C</b> hide cursor
               </div>
             </div>
-          </section>
+          </div>
+        </div>
 
-          <!-- Beat 03 · capability matrix -->
-          <section class="shell__matrix layer">
-            <div class="mx__hd">
-              <div>
-                <h2>What the app layer buys you</h2>
-                <p>PASSIVE STORE vs. ACTIVE SYSTEM</p>
-              </div>
-              <div class="pill"><i></i>WORKERS RUNNING</div>
-            </div>
-
-            <div class="mx__thead">
-              <span>CAPABILITY</span>
-              <span class="off">POSTGRES / BAAS — YOU BUILD IT</span>
-              <span class="on">TWENTY CRM — IT IS ALREADY RUNNING</span>
-            </div>
-
-            <div class="mx__rows">
-              <div class="mx__row" style="--d:.10s">
-                <span class="mx__label"><i>01</i>Data ingestion</span>
-                <div class="mx__cell mx__cell--off"><i></i>Waits for your own frontend to POST</div>
-                <div class="mx__cell mx__cell--on"><i></i>Background workers poll IMAP and CalDAV</div>
-              </div>
-              <div class="mx__row" style="--d:.17s">
-                <span class="mx__label"><i>02</i>Email handling</span>
-                <div class="mx__cell mx__cell--off"><i></i>Stores the raw text payload</div>
-                <div class="mx__cell mx__cell--on"><i></i>Parses MIME, dedupes threads, attaches to Contacts</div>
-              </div>
-              <div class="mx__row" style="--d:.24s">
-                <span class="mx__label"><i>03</i>Business logic</span>
-                <div class="mx__cell mx__cell--off"><i></i>Edge functions and triggers you write</div>
-                <div class="mx__cell mx__cell--on"><i></i>Entity relations, duplicate management, lead scoring</div>
-              </div>
-              <div class="mx__row" style="--d:.31s">
-                <span class="mx__label"><i>04</i>Workflows</span>
-                <div class="mx__cell mx__cell--off"><i></i>Every automation hand-rolled</div>
-                <div class="mx__cell mx__cell--on"><i></i>Native trigger-based sequences</div>
-              </div>
-              <div class="mx__row" style="--d:.38s">
-                <span class="mx__label"><i>05</i>Interface</span>
-                <div class="mx__cell mx__cell--off"><i></i>Headless API, generic table views</div>
-                <div class="mx__cell mx__cell--on"><i></i>Kanban pipelines, activity timelines, unified inbox</div>
-              </div>
-            </div>
-
-            <div class="mx__verdict">
-              <b>The database is the easy 10%.</b> The application layer is the product.
-              <span>AND THE LAYER IS WHERE THE MAINTENANCE LIVES</span>
-            </div>
-          </section>
-
-          <!-- Beat 05 · the DIY iceberg -->
-          <section class="shell__trap layer">
-            <div class="trap__hd">
-              <h2>Polling is the tip of the iceberg</h2>
-              <p>THE "I COULD BUILD THIS IN A WEEKEND" TRAP</p>
-            </div>
-
-            <div class="trap__grid">
-              <article class="tcard" style="--d:.10s">
-                <span class="tcard__n">01 · PROTOCOLS</span>
-                <h3>IMAP was not designed for your schema</h3>
-                <p>Raw MIME strings, base64 attachments, chaotic HTML signatures, infinitely nested threads — plus provider rate limits and connections that drop mid-fetch.</p>
-                <code>parse(MIME) → text · parts · thread</code>
-              </article>
-
-              <article class="tcard" style="--d:.18s">
-                <span class="tcard__n">02 · CALENDARS</span>
-                <h3>Recurrence is a state machine</h3>
-                <p>“Every Tuesday, except next Tuesday, which moved to Wednesday.” RRULE parsing, timezone offsets, DST shifts and attendee RSVP states, forever.</p>
-                <code>RRULE · TZID · DST · PARTSTAT</code>
-              </article>
-
-              <article class="tcard" style="--d:.26s">
-                <span class="tcard__n">03 · RESOLUTION</span>
-                <h3>Who is <b>john.doe@</b>…?</h3>
-                <p>Known contact? Known company domain? Auto-create or not? Ignore <b>noreply@</b>, split multi-recipient threads, merge the dupe when he writes from his personal address.</p>
-                <code>match → create → merge → suppress</code>
-              </article>
-
-              <article class="tcard" style="--d:.34s">
-                <span class="tcard__n">04 · THE VIEW</span>
-                <h3>A SQL view is not a timeline</h3>
-                <p>One company record has to interleave emails, meetings, notes and stage changes, chronologically. That needs join logic <em>and</em> a UI layer built for the shape.</p>
-                <code>JOIN ≠ TIMELINE</code>
-              </article>
-            </div>
-
-            <div class="trap__verdict">
-              <span><b>BUILD IT IF</b>you want a static, read-only rolodex</span>
-              <span class="trap__v--warn"><b>USE THE CRM IF</b>you need to act on the data</span>
-            </div>
-          </section>
-
-          <!-- Beat 06 · the middle ground -->
-          <section class="shell__stack layer">
-            <div class="stack__hd">
-              <h2>The middle ground: wire three tools</h2>
-              <p>BASEROW · NOCODB · SUPABASE, GLUED BY AN AUTOMATION TOOL</p>
-            </div>
-
-            <div class="flow">
-              <i class="pkt"></i>
-              <span>IMAP / CALDAV TRIGGER</span><em>→</em><span><b>n8n</b></span><em>→</em>
-              <span>POSTGRES</span><em>→</em><span>NOCODB · BASEROW · RETOOL · APPSMITH</span>
-            </div>
-
-            <div class="stack__cols">
-              <article class="lay" style="--d:.10s">
-                <span class="lay__t">01 · WORKER — SYNC ENGINE</span>
-                <h3>n8n</h3>
-                <ul>
-                  <li><b>IMAP trigger node</b> pulls the mailbox on a schedule</li>
-                  <li>Strips HTML, decodes MIME, normalises the payload</li>
-                  <li>POSTs clean JSON into your tables</li>
-                </ul>
-                <span class="lay__foot">OAUTH TOKENS · RETRIES · THE GLUE</span>
-              </article>
-
-              <article class="lay" style="--d:.18s">
-                <span class="lay__t">02 · BRAIN — DATABASE</span>
-                <h3>Supabase <em>/ NocoDB</em></h3>
-                <ul>
-                  <li>Managed Postgres you can still open with <b>psql</b></li>
-                  <li>REST / GraphQL API and auth, for free</li>
-                  <li>Edge functions and webhooks for incoming mail</li>
-                </ul>
-                <span class="lay__foot">YOUR SCHEMA · YOUR TABLES</span>
-              </article>
-
-              <article class="lay" style="--d:.26s">
-                <span class="lay__t">03 · FACE — THE UI</span>
-                <h3>Retool <em>/ Appsmith</em></h3>
-                <ul>
-                  <li>Drag-and-drop grids, boards and detail views</li>
-                  <li>Bind widgets straight to the database</li>
-                  <li>NocoDB and Baserow's own views get you started</li>
-                </ul>
-                <span class="lay__foot">NO FRONT END FROM SCRATCH</span>
-              </article>
-            </div>
-
-            <div class="stack__verdict">
-              <span><b>+</b>exact schema, no vendor lock-in</span>
-              <span class="sv--warn"><b>−</b>glue-code tax: parser rot, and the timeline stays hard</span>
-            </div>
-          </section>
-        </main>
-
-        <!-- FULL-STAGE SCREENS -------------------------------------------------->
-        <section class="screens">
-
-          <!-- Beat 04 · how the communications data actually gets in -->
-          <article class="screen screen--pipe">
-            <div class="scr__hd">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6.5h18v11H3z"/><path d="M3.6 7 12 13l8.4-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              Ingestion <span>NOBODY POSTS TO YOUR API</span>
-            </div>
-
-            <div class="pipe">
-              <div class="pipe__col" style="--d:.10s">
-                <span class="pipe__k">SOURCES</span>
-                <h3>You connect the real provider</h3>
-                <ul>
-                  <li><b>IMAP</b> — the CRM becomes a headless mail client on your Gmail or Outlook account</li>
-                  <li><b>CalDAV</b> — pulls meetings in and writes changes back, bidirectionally</li>
-                </ul>
-                <span class="pipe__tag">GMAIL · OUTLOOK · FASTMAIL</span>
-              </div>
-
-              <div class="pipe__wire"><i></i><i></i><i></i></div>
-
-              <div class="pipe__col pipe__col--cy" style="--d:.18s">
-                <span class="pipe__k">WORKERS</span>
-                <h3>Continuously, in the background</h3>
-                <ul>
-                  <li>Poll on a loop with <b>backoff</b> when a provider rate-limits you</li>
-                  <li>Parse MIME and iCalendar into structured rows</li>
-                  <li>Decode attachments, strip quote chains, dedupe the thread</li>
-                </ul>
-                <span class="pipe__tag">RETRY · BACKOFF · IDEMPOTENT WRITE</span>
-              </div>
-
-              <div class="pipe__wire"><i></i><i></i><i></i></div>
-
-              <div class="pipe__col" style="--d:.26s">
-                <span class="pipe__k">RECORD LINKING</span>
-                <h3>It lands on the right timeline</h3>
-                <ul>
-                  <li>Match sender and recipients against <b>Contact</b>, then <b>Company</b></li>
-                  <li>Auto-create when nothing matches; merge when it should</li>
-                  <li>Filter impersonal addresses so the timeline stays signal</li>
-                </ul>
-                <span class="pipe__tag">ATTACHED · NOT DUMPED IN A TABLE</span>
-              </div>
-            </div>
-
-            <div class="pipe__foot">
-              <span><b>SMTP</b>sends outbound from the CRM</span>
-              <span><b>CALDAV</b>syncs appointments both ways</span>
-              <span><b>DEDUPE</b>threads, not single messages</span>
-              <span><b>FILTER</b>drops noreply@ and support@</span>
-            </div>
-          </article>
-
-          <!-- Beat 07 · one Postgres, one schema per app -->
-          <article class="screen screen--db">
-            <div class="scr__hd">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="6.4" rx="7.4" ry="3.2"/><path d="M4.6 6.4v11.2c0 1.8 3.3 3.2 7.4 3.2s7.4-1.4 7.4-3.2V6.4" stroke-linecap="round"/></svg>
-              One Postgres <span>GOLDEN RULE · ONE APP, ONE SCHEMA</span>
-            </div>
-
-            <div class="db">
-              <div class="db__map">
-                <svg class="db__wires" viewBox="0 0 900 690" preserveAspectRatio="none" aria-hidden="true">
-                  <line class="draw" style="--d:.55s" x1="450" y1="345" x2="450" y2="130"/>
-                  <line class="draw" style="--d:.62s" x1="450" y1="345" x2="182" y2="225"/>
-                  <line class="draw" style="--d:.69s" x1="450" y1="345" x2="182" y2="441"/>
-                  <line class="draw" style="--d:.76s" x1="450" y1="345" x2="718" y2="225"/>
-                  <line class="draw" style="--d:.83s" x1="450" y1="345" x2="718" y2="441"/>
+        <!-- ══ 1 · THE PROBLEM ════════════════════════════════════════════ -->
+        <div class="layer" data-beat="1">
+          <div class="fx">
+            <div class="body" style="display:grid;grid-template-columns:1fr 20cqw;gap:4cqw;align-items:center">
+              <div style="display:flex;flex-direction:column;gap:2cqw">
+                <span class="micro">01 — the problem</span>
+                <svg class="tsvg t-l" viewBox="0 0 1120 660" data-fit="1120" data-ref="190"
+                     role="img" aria-label="Speed isn't feeling">
+                  <g><text class="dt" x="0" y="150" style="--d:0">SPEED</text>
+                     <text class="dt" x="0" y="380" style="--d:1">ISN'T</text>
+                     <text class="dt" x="0" y="610" style="--d:2">FEELING.</text></g>
                 </svg>
+                <div class="rule" style="width:30cqw"></div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:1.6cqw;align-items:flex-end;text-align:right">
+                <div class="rail" data-rail="8"></div>
+                <span class="tag">12 fps</span>
+                <p class="sub" data-words>Your product is fast. It still feels dead.</p>
+              </div>
+            </div>
+          </div>
+        </div>
 
-                <div class="db__core"><b>POSTGRES</b><span>PGVECTOR</span></div>
+        <!-- ══ 2 · THE CAUSE ══════════════════════════════════════════════ -->
+        <div class="layer" data-beat="2">
+          <div class="fx">
+            <div class="body" style="display:flex;flex-direction:column;justify-content:space-between">
+              <div style="display:flex;flex-direction:column;gap:2cqw">
+                <span class="micro">02 — the cause</span>
+                <svg class="tsvg t-m" viewBox="0 0 1120 460" data-fit="1120" data-ref="190"
+                     role="img" aria-label="Motion is an afterthought">
+                  <g><text class="dt" x="0" y="150" style="--d:0">MOTION IS AN</text>
+                     <text class="dt" x="0" y="380" style="--d:1">AFTERTHOUGHT.</text></g>
+                </svg>
+                <p class="sub" data-words>Shipped last. Owned by nobody. Felt by everyone.</p>
+              </div>
+              <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:var(--pad)">
+                <div class="bars jank" data-bars="12"></div>
+                <span class="tag">everything steps</span>
+              </div>
+            </div>
+          </div>
+        </div>
 
-                <div class="db__chip db__chip--cy" style="--x:0px;--y:-215px;--d:.30s">
-                  <b>communications</b><span>mail + calendar + linked threads</span>
-                </div>
-                <div class="db__chip" style="--x:-268px;--y:-120px;--d:.36s">
-                  <b>listmonk</b><span>newsletters, subscribers, campaigns</span>
-                </div>
-                <div class="db__chip" style="--x:-268px;--y:96px;--d:.42s">
-                  <b>cms</b><span>blogs, notes, todos, drafts</span>
-                </div>
-                <div class="db__chip" style="--x:268px;--y:-120px;--d:.48s">
-                  <b>ai_memory</b><span>chat logs + vector embeddings</span>
-                </div>
-                <div class="db__chip db__chip--cy" style="--x:268px;--y:96px;--d:.54s">
-                  <b>unified</b><span>views that join across all of them</span>
+        <!-- ══ 3 · THE SHIFT — the plate rim is the progress ring ═════════ -->
+        <div class="layer" data-beat="3">
+          <div class="fx">
+            <svg class="dial" viewBox="0 0 100 100" aria-hidden="true">
+              <circle class="trk" cx="50" cy="50" r="47"/>
+              <circle class="fil" cx="50" cy="50" r="47" pathLength="100"/>
+            </svg>
+            <div class="dial-core">
+              <span class="num-xl" id="dialNum">0</span>
+              <span class="micro">one system<br>every surface</span>
+            </div>
+            <div style="position:absolute;left:100%;top:50%;transform:translateY(-50%);
+                        margin-left:6cqw;width:32cqw;display:flex;flex-direction:column;gap:2cqw">
+              <span class="micro">03 — the shift</span>
+              <svg class="tsvg" viewBox="0 0 720 420" data-fit="720" data-ref="190" style="width:32cqw"
+                   role="img" aria-label="Meet Cadence">
+                <g><text class="dt" x="0" y="150" style="--d:0">MEET</text>
+                   <text class="dt" x="0" y="380" style="--d:1">CADENCE.</text></g>
+              </svg>
+              <div class="rule" style="width:100%"></div>
+              <p class="sub" data-words>A motion system, not a stylesheet.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ══ 4 · THE TIMING ═════════════════════════════════════════════ -->
+        <div class="layer" data-beat="4">
+          <div class="fx">
+            <div class="body" style="display:grid;grid-template-columns:1fr 30cqw;gap:4cqw;align-items:center">
+              <div style="display:flex;flex-direction:column;gap:1.6cqw">
+                <span class="micro">04 — the timing</span>
+                <svg class="tsvg" viewBox="0 0 900 420" data-fit="900" data-ref="190" style="width:36cqw"
+                     role="img" aria-label="Snap in. Land soft.">
+                  <g><text class="dt" x="0" y="150" style="--d:0">SNAP IN.</text>
+                     <text class="dt" x="0" y="380" style="--d:1">LAND SOFT.</text></g>
+                </svg>
+                <div style="display:flex;align-items:baseline;gap:2.2cqw">
+                  <div class="stat"><b>240</b><span>ms</span></div>
+                  <p class="sub" style="flex:1;max-width:26cqw">One curve. Every entrance. No exception.</p>
                 </div>
               </div>
-
-              <aside class="db__side">
-                <span class="db__k">ONE TOOL PER JOB, ALL ON THE SAME DATABASE</span>
-
-                <div class="toolrow"><b>Listmonk</b><span>newsletters</span><em>POSTGRES NATIVE</em></div>
-                <div class="toolrow"><b>Directus</b><span>CMS + instant API over your raw SQL</span><em>MIRRORS SCHEMA</em></div>
-                <div class="toolrow"><b>Cal.com</b><span>“book a time with me” scheduling</span><em>POSTGRES NATIVE</em></div>
-                <div class="toolrow"><b>n8n</b><span>the IMAP / CalDAV worker</span><em>WRITES ROWS</em></div>
-                <div class="toolrow"><b>Umami</b><span>privacy-first analytics on your landing pages</span><em>LINK TO CONTACTS</em></div>
-                <div class="toolrow"><b>Astro</b><span>landing pages rendered from the CMS</span><em>READS THE API</em></div>
-
-                <div class="db__callout">
-                  <b>THE PAYOFF — ONE QUERY, NO GLUE BILL</b>
-                  Contacts who clicked a campaign, emailed you in the last 30 days, and already have an AI-drafted reply. <code>SELECT … FROM unified …</code>
+              <div class="curve-row">
+                <div class="curve">
+                  <svg viewBox="0 0 320 220" aria-hidden="true">
+                    <line class="axis" x1="10" y1="200" x2="310" y2="200"/>
+                    <line class="axis" x1="10" y1="200" x2="10" y2="20"/>
+                    <path class="path" d="M10 200 C 80 200 150 20 310 20" pathLength="100"/>
+                    <circle class="dot" cx="10" cy="200" r="7"/>
+                  </svg>
+                  <span class="lab">entrance easing</span>
                 </div>
-              </aside>
-            </div>
-          </article>
-        </section>
-
-        <!-- BEAT 08 · logo landing --------------------------------------------->
-        <section class="logo">
-          <div class="logo__glow"></div>
-          <div class="logo__ring">
-            <svg class="spin" viewBox="0 0 190 190" fill="none" aria-hidden="true">
-              <circle cx="95" cy="95" r="86" stroke="rgba(255,255,255,.12)" stroke-width="1"/>
-              <path d="M95 9 A86 86 0 0 1 181 95" stroke="#2ee6d6" stroke-width="2.4" stroke-linecap="round"/>
-              <path d="M9 95 A86 86 0 0 1 95 181" stroke="rgba(255,90,31,.9)" stroke-width="2.4" stroke-linecap="round"/>
-            </svg>
-            <svg viewBox="0 0 190 190" fill="none" aria-hidden="true">
-              <ellipse cx="95" cy="60" rx="36" ry="14" fill="rgba(46,230,214,.16)" stroke="rgba(255,255,255,.55)" stroke-width="2"/>
-              <path d="M59 60v62c0 7.7 16.1 14 36 14s36-6.3 36-14V60" stroke="rgba(255,255,255,.55)" stroke-width="2"/>
-              <path d="M59 91c0 7.7 16.1 14 36 14s36-6.3 36-14" stroke="rgba(255,255,255,.3)" stroke-width="2"/>
-            </svg>
-          </div>
-          <div class="logo__word">SCHEMA</div>
-          <div class="logo__tag">one database, every app</div>
-          <div class="cta">
-            <div class="cta__btn">
-              Start with one table
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </div>
-            <div class="cta__meta">
-              <span>SCHEMA.LOCAL/02</span>
-              <span><b>2560×1440</b></span>
-              <span><b>60 FPS</b></span>
-              <span>REEL 02 · END</span>
+                <div class="bars smooth" data-bars="9" style="height:4cqw"></div>
+              </div>
             </div>
           </div>
-        </section>
+        </div>
 
-        <div class="scan"></div>
-        <div class="grain"></div>
-      </div>
+        <!-- ══ 5 · THE SYSTEM ═════════════════════════════════════════════ -->
+        <div class="layer" data-beat="5">
+          <div class="fx">
+            <div class="body" style="display:flex;flex-direction:column">
+              <svg class="tsvg t-w" viewBox="0 0 1120 230" data-fit="1120" data-ref="190"
+                   role="img" aria-label="Four primitives">
+                <g><text class="dt" x="0" y="160" style="--d:0">FOUR PRIMITIVES.</text></g>
+              </svg>
+              <div class="prims">
+                <div class="prim" style="--i:0">
+                  <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M16 84 L34 22 L52 84 L70 22 L86 84" pathLength="100"/></svg>
+                  <b>Spring</b><span>weight</span>
+                </div>
+                <div class="prim" style="--i:1">
+                  <svg viewBox="0 0 100 100" aria-hidden="true">
+                    <line x1="22" y1="24" x2="22" y2="54" pathLength="100"/>
+                    <line x1="50" y1="40" x2="50" y2="74" pathLength="100"/>
+                    <line x1="78" y1="18" x2="78" y2="48" pathLength="100"/>
+                  </svg>
+                  <b>Stagger</b><span>sequence</span>
+                </div>
+                <div class="prim" style="--i:2">
+                  <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M14 82 C 44 82 56 20 86 20" pathLength="100"/></svg>
+                  <b>Ease</b><span>tempo</span>
+                </div>
+                <div class="prim" style="--i:3">
+                  <svg viewBox="0 0 100 100" aria-hidden="true">
+                    <circle cx="50" cy="50" r="35" pathLength="100"/>
+                    <line x1="41" y1="36" x2="41" y2="64" pathLength="100"/>
+                    <line x1="59" y1="36" x2="59" y2="64" pathLength="100"/>
+                  </svg>
+                  <b>Reduce</b><span>respect</span>
+                </div>
+              </div>
+              <div class="foot">
+                <div class="hair"></div>
+                <p class="sub" style="max-width:none" data-words>And when motion is unwelcome, it stops. Press R.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ══ 6 · THE COMPOUND — 3D pull-out ═════════════════════════════ -->
+        <div class="layer" data-beat="6">
+          <div class="fx">
+            <div style="position:absolute;left:0;right:0;top:-12cqw;display:flex;flex-direction:column;
+                        align-items:center;gap:1.2cqw">
+              <span class="micro">06 — the compound</span>
+              <svg class="tsvg" viewBox="0 0 760 230" data-fit="760" data-ref="170" style="width:60cqw"
+                   role="img" aria-label="It all compounds">
+                <g><text class="dt" x="0" y="160" style="--d:0">IT ALL COMPOUNDS.</text></g>
+              </svg>
+            </div>
+          </div>
+          <div class="orbit">
+            <div class="core"></div>
+            <div class="icard"><b>FEELING<br>IS A FEATURE</b><span>thesis</span></div>
+            <div class="icard"><b>MOTION ISN'T<br>DECORATION</b><span>principle</span></div>
+            <div class="icard"><b>SNAP IN.<br>LAND SOFT.</b><span>timing</span></div>
+            <div class="icard"><b>60 FPS<br>OR NOTHING</b><span>standard</span></div>
+          </div>
+        </div>
+
+        <!-- ══ 7 · THE IDEA — logo lockup ═════════════════════════════════ -->
+        <div class="layer" data-beat="7">
+          <div class="halo" aria-hidden="true"></div>
+          <div class="fx">
+            <div class="lockmark">
+              <svg viewBox="0 0 100 100" aria-hidden="true">
+                <circle cx="50" cy="50" r="46" pathLength="100" stroke="var(--accent)" stroke-width="3"/>
+                <path d="M74 31 A 30 30 0 1 0 74 69" pathLength="100" stroke="var(--paper)" stroke-width="9"
+                      stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="lock-word">
+              <svg class="tsvg" viewBox="0 0 720 230" data-fit="720" data-ref="150" data-align="center"
+                   role="img" aria-label="Cadence">
+                <g><text class="dt" x="360" y="160" style="--d:1">CADENCE</text></g>
+              </svg>
+            </div>
+            <div class="thesis">
+              <p class="sub" style="max-width:none;text-align:center;color:var(--paper)" data-words>Feeling is a feature.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ══ 8 · THE ASK ════════════════════════════════════════════════ -->
+        <div class="layer" data-beat="8">
+          <div class="halo" aria-hidden="true" style="width:76cqw;height:44cqw;margin:-22cqw 0 0 -38cqw;opacity:.65"></div>
+          <div class="fx">
+            <div class="cta">
+              <span class="micro">08 — the ask</span>
+              <svg class="tsvg t-c" viewBox="0 0 1120 460" data-fit="1120" data-ref="190" data-align="center"
+                   role="img" aria-label="Start moving">
+                <g><text class="dt" x="560" y="150" style="--d:0">START</text>
+                   <text class="dt" x="560" y="380" style="--d:1">MOVING.</text></g>
+              </svg>
+              <p class="sub" style="text-align:center;max-width:32cqw" data-words>Ship software people can feel.</p>
+              <span class="cta-btn">See it live
+                <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="3.4"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M13 5l7 7-7 7"/></svg>
+              </span>
+              <span class="url">cadence.design <span>— eight beats, one system</span></span>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
 
-    <!-- simulated high-contrast cursor --------------------------------------->
-    <div class="cursor" id="cursor">
-      <div class="cursor__ring"></div>
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 2.6 19.4 11 12 12.6 8.6 20z" fill="#f6f7f9" stroke="#06070a" stroke-width="1.4" stroke-linejoin="round"/>
-      </svg>
-      <div class="cursor__label">CLICK</div>
+    <div class="grain" aria-hidden="true"></div>
+
+    <div class="chrome" aria-hidden="true">
+      <div class="brand">CADENCE</div>
+      <div class="beat-tag" id="beatTag">cold open</div>
+      <div class="meter"><b id="beatNum">00</b><em>/ 08</em></div>
+      <div class="track"><i id="trackFill"></i></div>
+      <div class="ticks" id="ticks"></div>
+      <div class="keys"><b>space</b> advance &nbsp; <b>←</b> back &nbsp; <b>1–8</b> jump</div>
+      <div class="snd" id="sndTag">M · sound on</div>
     </div>
 
   </div>
 </div>
 
 <script>
-(function () {
-  'use strict';
+"use strict";
+/* ===========================================================================
+   A · SOUND DESIGN — synthesised with WebAudio.  No base64 payloads: the same
+       three cues (click / whoosh / thump) cost ~3 KB of code instead of
+       ~200 KB of encoded WAV, and they stay re-tunable with one number.
+   =========================================================================== */
+const SFX = (function(){
+  let ctx=null, master=null, noise=null, muted=false;
+  const AC = window.AudioContext || window.webkitAudioContext;
 
-  /* ==========================================================================
-     0. CONFIG
-     ========================================================================== */
-  var TOTAL = 8;
-  var STAGE_W = 2560, STAGE_H = 1440;
-
-  /* Cursor path: one waypoint per beat, in stage coordinates. */
-  var CURSOR = {
-    1: [1290, 900],
-    2: [1980, 900],
-    3: [1830, 700],
-    4: [1700, 1060],
-    5: [800, 900],
-    6: [1814, 640],
-    7: [1750, 1010],
-    8: [1280, 985]
+  function init(){
+    if(ctx){ if(ctx.state === "suspended") ctx.resume().catch(function(){}); return; }
+    if(!AC) return;
+    ctx = new AC();
+    const comp = ctx.createDynamicsCompressor();          // glue + clip guard
+    comp.threshold.value = -15; comp.knee.value = 16; comp.ratio.value = 9;
+    comp.attack.value = .003;  comp.release.value = .22;
+    master = ctx.createGain(); master.gain.value = .5;
+    master.connect(comp); comp.connect(ctx.destination);
+    const n = Math.floor(ctx.sampleRate * .8);             // one shared noise bed
+    noise = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = noise.getChannelData(0);
+    for(let i=0;i<n;i++) d[i] = Math.random()*2-1;
+  }
+  function src(){ const s = ctx.createBufferSource(); s.buffer = noise; return s; }
+  function g(v){ const x = ctx.createGain(); x.gain.value = v; return x; }
+  function env(p, t, a, peak, d){                          // percussive envelope
+    p.gain.setValueAtTime(.0001, t);
+    p.gain.exponentialRampToValueAtTime(peak, t + a);
+    p.gain.exponentialRampToValueAtTime(.0001, t + a + d);
+  }
+  function drive(k){                                       // soft saturation
+    const ws = ctx.createWaveShaper(), n = 1024, c = new Float32Array(n);
+    for(let i=0;i<n;i++){ const x = i/(n-1)*2-1; c[i] = Math.tanh(k*x)/Math.tanh(k); }
+    ws.curve = c; return ws;
+  }
+  function click(){                                        // crisp high-frequency click
+    if(!ctx||muted) return; const t = ctx.currentTime;
+    const o = ctx.createOscillator(); o.type = "triangle";
+    o.frequency.setValueAtTime(3400,t); o.frequency.exponentialRampToValueAtTime(1300,t+.05);
+    const p = g(0); env(p,t,.003,.30,.055); o.connect(p).connect(master); o.start(t); o.stop(t+.1);
+    const s = src(), hp = ctx.createBiquadFilter(); hp.type="highpass"; hp.frequency.value=4400;
+    const p2 = g(0); env(p2,t,.002,.20,.028);
+    s.connect(hp).connect(p2).connect(master); s.start(t); s.stop(t+.06);
+  }
+  function whoosh(){                                       // deep whoosh during morphs
+    if(!ctx||muted) return; const t = ctx.currentTime, D = .78;
+    const s = src(), bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 1.05;
+    bp.frequency.setValueAtTime(230,t);
+    bp.frequency.exponentialRampToValueAtTime(5600,t + D*.72);
+    bp.frequency.exponentialRampToValueAtTime(620,t + D);
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 7200;
+    const p = g(0); env(p,t,.09,.32,D*.5);
+    let node = s.connect(bp).connect(lp);
+    if(ctx.createStereoPanner){
+      const pan = ctx.createStereoPanner();
+      pan.pan.setValueAtTime(-.85,t); pan.pan.linearRampToValueAtTime(.85,t+D);
+      node = node.connect(pan);
+    }
+    node.connect(p).connect(master); s.start(t); s.stop(t + D + .1);
+    const o = ctx.createOscillator(); o.type = "sine";
+    o.frequency.setValueAtTime(158,t); o.frequency.exponentialRampToValueAtTime(50,t + D*.85);
+    const p2 = g(0); env(p2,t,.06,.20,D*.5); o.connect(p2).connect(master); o.start(t); o.stop(t + D + .1);
+  }
+  function thump(){                                        // heavy sub-thump on lock
+    if(!ctx||muted) return; const t = ctx.currentTime;
+    const o = ctx.createOscillator(); o.type = "sine";
+    o.frequency.setValueAtTime(118,t); o.frequency.exponentialRampToValueAtTime(33,t+.55);
+    const p = g(0); env(p,t,.012,.85,.68);
+    o.connect(drive(2.2)).connect(p).connect(master); o.start(t); o.stop(t+.85);
+    [69,104].forEach(function(f,i){                        // harmonics: audible on laptops
+      const h = ctx.createOscillator(); h.type = i ? "triangle" : "sine";
+      h.frequency.setValueAtTime(f,t); h.frequency.exponentialRampToValueAtTime(f*.55,t+.4);
+      const hp = g(0); env(hp,t,.008,.16/(i+1),.34);
+      h.connect(hp).connect(master); h.start(t); h.stop(t+.5);
+    });
+    const s = src(), lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 170;
+    const p3 = g(0); env(p3,t,.005,.42,.22);
+    s.connect(lp).connect(p3).connect(master); s.start(t); s.stop(t+.35);
+  }
+  function back(){                                         // reverse sweep
+    if(!ctx||muted) return; const t = ctx.currentTime, D = .34;
+    const s = src(), bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = 1.6;
+    bp.frequency.setValueAtTime(3600,t); bp.frequency.exponentialRampToValueAtTime(420,t+D);
+    const p = g(0); env(p,t,.006,.20,D*.6);
+    s.connect(bp).connect(p).connect(master); s.start(t); s.stop(t + D + .06);
+    const o = ctx.createOscillator(); o.type = "triangle";
+    o.frequency.setValueAtTime(1500,t); o.frequency.exponentialRampToValueAtTime(700,t+.06);
+    const p2 = g(0); env(p2,t,.003,.16,.07); o.connect(p2).connect(master); o.start(t); o.stop(t+.12);
+  }
+  return {
+    init:init, click:click, whoosh:whoosh, thump:thump, back:back,
+    toggle:function(){ muted = !muted; return muted; }
   };
-
-  var body   = document.body;
-  var beats  = document.querySelectorAll('.beat');
-  var cursor = document.getElementById('cursor');
-
-  var cur = 1;
-
-  /* ==========================================================================
-     1. 1440p CONSTRAINT — the stage is always 2560x1440, only scaled to fit
-     ========================================================================== */
-  function fit() {
-    var s = Math.min(window.innerWidth / STAGE_W, window.innerHeight / STAGE_H);
-    document.documentElement.style.setProperty('--scale', String(s));
-  }
-  fit();
-  window.addEventListener('resize', fit, { passive: true });
-
-  /* ==========================================================================
-     2. SOUND DESIGN — WebAudio synthesis (no assets, no base64 payload)
-        click  : crisp high-frequency transient
-        whoosh : filtered noise sweep for container morphs
-        thump  : sub sine 160Hz -> 36Hz for the logo landing
-     ========================================================================== */
-  var Sfx = (function () {
-    var ctx = null, master = null, noiseBuf = null;
-
-    function ac() {
-      if (!ctx) {
-        var AC = window.AudioContext || window.webkitAudioContext;
-        if (!AC) return null;
-        ctx = new AC();
-        master = ctx.createGain();
-        master.gain.value = 0.4;
-        var comp = ctx.createDynamicsCompressor();
-        comp.threshold.value = -18; comp.knee.value = 12; comp.ratio.value = 8;
-        master.connect(comp);
-        comp.connect(ctx.destination);
-      }
-      if (ctx.state === 'suspended') ctx.resume();
-      return ctx;
-    }
-
-    function noise(c) {
-      if (noiseBuf) return noiseBuf;
-      var len = Math.floor(c.sampleRate * 1.4);
-      noiseBuf = c.createBuffer(1, len, c.sampleRate);
-      var d = noiseBuf.getChannelData(0), s = 0;
-      for (var i = 0; i < len; i++) {
-        var w = Math.random() * 2 - 1;
-        s = (s + 0.022 * w) / 1.022;
-        d[i] = s * 3.4;
-      }
-      return noiseBuf;
-    }
-
-    function click() {
-      var c = ac(); if (!c) return;
-      var t = c.currentTime;
-
-      var o = c.createOscillator();
-      o.type = 'triangle';
-      o.frequency.setValueAtTime(2600, t);
-      o.frequency.exponentialRampToValueAtTime(880, t + 0.035);
-      var g = c.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.42, t + 0.004);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
-      o.connect(g); g.connect(master);
-      o.start(t); o.stop(t + 0.08);
-
-      var n = c.createBufferSource(); n.buffer = noise(c);
-      var hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3800;
-      var ng = c.createGain();
-      ng.gain.setValueAtTime(0.0001, t);
-      ng.gain.exponentialRampToValueAtTime(0.22, t + 0.002);
-      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
-      n.connect(hp); hp.connect(ng); ng.connect(master);
-      n.start(t); n.stop(t + 0.05);
-    }
-
-    function whoosh(reverse) {
-      var c = ac(); if (!c) return;
-      var t = c.currentTime, dur = reverse ? 0.55 : 0.78;
-
-      var n = c.createBufferSource(); n.buffer = noise(c); n.loop = true;
-      var bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.15;
-      if (reverse) {
-        bp.frequency.setValueAtTime(2400, t);
-        bp.frequency.exponentialRampToValueAtTime(240, t + dur);
-      } else {
-        bp.frequency.setValueAtTime(170, t);
-        bp.frequency.exponentialRampToValueAtTime(2700, t + dur * 0.34);
-        bp.frequency.exponentialRampToValueAtTime(400, t + dur);
-      }
-      var g = c.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(reverse ? 0.3 : 0.5, t + 0.09);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-
-      n.connect(bp); bp.connect(g); g.connect(master);
-      n.start(t); n.stop(t + dur + 0.05);
-    }
-
-    function thump() {
-      var c = ac(); if (!c) return;
-      var t = c.currentTime;
-
-      var o = c.createOscillator();
-      o.type = 'sine';
-      o.frequency.setValueAtTime(168, t);
-      o.frequency.exponentialRampToValueAtTime(36, t + 0.44);
-      var g = c.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.95, t + 0.014);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.62);
-      o.connect(g); g.connect(master);
-      o.start(t); o.stop(t + 0.7);
-
-      var n = c.createBufferSource(); n.buffer = noise(c);
-      var lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
-      var ng = c.createGain();
-      ng.gain.setValueAtTime(0.0001, t);
-      ng.gain.exponentialRampToValueAtTime(0.3, t + 0.006);
-      ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.19);
-      n.connect(lp); lp.connect(ng); ng.connect(master);
-      n.start(t); n.stop(t + 0.24);
-    }
-
-    return { click: click, whoosh: whoosh, thump: thump };
-  })();
-
-  /* ==========================================================================
-     3. WIRE SELF-DRAW — measure real geometry length, feed --len to CSS
-        (paint-only animation; no reflow, so the render contract holds)
-     ========================================================================== */
-  Array.prototype.forEach.call(
-    document.querySelectorAll('path.draw, line.draw, polyline.draw'),
-    function (p) {
-      var len = 0;
-      try { len = p.getTotalLength(); } catch (e) { len = 0; }
-      if (!len) len = 900;
-      p.style.setProperty('--len', String(Math.ceil(len) + 2));
-    }
-  );
-
-  /* ==========================================================================
-     4. STATE MACHINE
-     ========================================================================== */
-  function setBeats(n) {
-    for (var k = 0; k < beats.length; k++) {
-      beats[k].classList.toggle('on', k + 1 === n);
-    }
-  }
-
-  function press() {
-    cursor.classList.add('press');
-    window.setTimeout(function () { cursor.classList.remove('press'); }, 130);
-  }
-
-  function go(n, via) {
-    var next = Math.max(1, Math.min(TOTAL, n));
-    if (next === cur) return;
-    var forward = next > cur;
-    cur = next;
-
-    for (var k = 1; k <= TOTAL; k++) body.classList.toggle('state-' + k, k === cur);
-    setBeats(cur);
-
-    var p = CURSOR[cur];
-    cursor.style.transform = 'translate3d(' + p[0] + 'px,' + p[1] + 'px,0)';
-
-    /* --- sound design cues --- */
-    if (via !== 'silent') {
-      Sfx.click();
-      if (forward) {
-        if (cur === 2) Sfx.whoosh(false);   // hero snap-in
-        if (cur === 3) Sfx.whoosh(false);   // matrix
-        if (cur === 4) Sfx.whoosh(false);   // pipeline screen
-        if (cur === 6) Sfx.whoosh(false);   // stack
-        if (cur === 7) Sfx.whoosh(false);   // schema hub
-        if (cur === 8) Sfx.thump();         // logo lands
-      } else {
-        Sfx.whoosh(true);
-      }
-      press();
-    }
-  }
-
-  function next() { go(cur + 1); }
-  function prev() { go(cur - 1); }
-
-  /* --- manual playback: SPACE / → / click advance, ← rewinds --- */
-  window.addEventListener('keydown', function (e) {
-    if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-    var k = e.key;
-    if (k === ' ' || k === 'Spacebar' || k === 'ArrowRight' || k === 'Right' ||
-        k === 'ArrowDown' || k === 'PageDown' || k === 'Enter') {
-      e.preventDefault(); next();
-    } else if (k === 'ArrowLeft' || k === 'Left' || k === 'ArrowUp' || k === 'PageUp') {
-      e.preventDefault(); prev();
-    }
-  }, { passive: false });
-
-  window.addEventListener('pointerdown', function (e) {
-    if (e.button !== undefined && e.button !== 0) return;
-    next();
-  });
-
-  /* --- init: put the cursor on the beat-01 waypoint without animating in --- */
-  (function init() {
-    var p = CURSOR[1];
-    cursor.style.transition = 'none';
-    cursor.style.transform = 'translate3d(' + p[0] + 'px,' + p[1] + 'px,0)';
-    void cursor.offsetWidth;   /* force a style flush so the next transform animates */
-    cursor.style.transition = '';
-    setBeats(1);
-    body.classList.add('state-1');
-  })();
-
-  /* expose for verification hooks */
-  window.__reel = { go: go, get state() { return cur; }, total: TOTAL };
 })();
+
+/* ===========================================================================
+   B · MACHINERY — SVG type fitting, word masks, procedural micro-parts
+   =========================================================================== */
+const LAYERS = Array.prototype.slice.call(document.querySelectorAll(".layer"));
+
+/* Every display SVG declares a target width and a reference size in user
+   units.  Measure the natural advance of the longest line, then set ONE
+   shared font-size so the block fills that width exactly — on any font, on
+   any machine — then re-hug the viewBox to the ink so nothing ever clips. */
+function fitSvg(svg){
+  const g = svg.querySelector("g"); if(!g) return;
+  const lines = Array.prototype.slice.call(g.querySelectorAll("text"));
+  if(!lines.length) return;
+  const ref = parseFloat(svg.dataset.ref || 100);
+  const target = parseFloat(svg.dataset.fit || 1000);
+  const centred = svg.dataset.align === "center";
+
+  lines.forEach(function(l){
+    l.setAttribute("font-size", ref);
+    l.removeAttribute("textLength"); l.removeAttribute("lengthAdjust");   // measure the raw advance
+  });
+  let longest = 0, maxAdv = 0;
+  lines.forEach(function(l,i){ const a = l.getComputedTextLength(); if(a > maxAdv){ maxAdv = a; longest = i; } });
+  if(!maxAdv) return;
+
+  let size = ref * target / maxAdv;
+  size = Math.max(ref*.45, Math.min(ref*2.4, size));
+  const lead = size * 1.14;
+  lines.forEach(function(l,i){
+    l.setAttribute("font-size", size);
+    l.setAttribute("x", centred ? target/2 : 0);
+    l.setAttribute("y", (i*lead + size*.80).toFixed(2));
+    if(centred) l.setAttribute("text-anchor","middle");
+    if(i === longest){ l.setAttribute("textLength", target); l.setAttribute("lengthAdjust","spacingAndGlyphs"); }
+    else { l.removeAttribute("textLength"); l.removeAttribute("lengthAdjust"); }
+    /* provisional dash: a safe over-estimate, refined by measureDash() */
+    if(!l.style.getPropertyValue("--dash")){
+      l.style.setProperty("--dash", Math.round(9 * size * Math.max(1, l.textContent.replace(/\s/g,"").length)));
+    }
+  });
+  const b = g.getBBox(), pad = size*.09;
+  if(b.width > 0){
+    svg.setAttribute("viewBox", [b.x-pad, b.y-pad, b.width+pad*2, b.height+pad*2]
+      .map(function(v){ return +v.toFixed(2); }).join(" "));
+  }
+}
+function fitAll(){ document.querySelectorAll("svg.tsvg").forEach(fitSvg); }
+
+/* Chromium ignores pathLength on <text>, and the dash pattern restarts on every
+   glyph outline — so a single "total length" number is wrong twice over.  What
+   matters is the LONGEST single glyph outline on the line: with
+   dasharray = max(glyph) the trace starts blank, advances evenly, and finishes
+   exactly as the paper fill floods in.  Measured by rasterising the real font
+   stack, one column histogram per line: outlineLen = inkArea / strokeWidth. */
+function alphaColumns(svgString, W, H){
+  return new Promise(function(resolve){
+    const img = new Image();
+    img.onload = function(){
+      try{
+        const c = document.createElement("canvas"); c.width = W; c.height = H;
+        const x = c.getContext("2d"); x.drawImage(img,0,0);
+        const d = x.getImageData(0,0,W,H).data;
+        const cols = new Float64Array(W);
+        for(let i=3,p=0;i<d.length;i+=4,p++) cols[p % W] += d[i]/255;
+        resolve(cols);
+      }catch(e){ resolve(null); }
+    };
+    img.onerror = function(){ resolve(null); };
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgString);
+  });
+}
+function glyphAdvances(el){
+  const text = el.textContent, probe = el.cloneNode(true);
+  probe.removeAttribute("textLength"); probe.removeAttribute("lengthAdjust");
+  probe.setAttribute("visibility","hidden"); probe.setAttribute("x","0"); probe.setAttribute("y","0");
+  el.parentNode.appendChild(probe);
+  const bounds = [];
+  for(let k=0;k<text.length;k++){ probe.textContent = text.slice(0,k+1); bounds.push(probe.getComputedTextLength()); }
+  probe.remove();
+  return bounds;
+}
+async function glyphDash(el){
+  const fs = parseFloat(el.getAttribute("font-size"));
+  if(!fs) return 0;
+  const text = el.textContent;
+  if(!text.trim()) return 0;
+  const cs = getComputedStyle(el);
+  const bounds = glyphAdvances(el);
+  if(!bounds.length) return 0;
+  const w = Math.max(2, fs*.06), pad = fs*.6;
+  const W = Math.ceil(bounds[bounds.length-1] + pad*2), H = Math.ceil(fs*2.2);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'">'
+    + '<text x="'+pad+'" y="'+(fs*1.45)+'" font-family="'+cs.fontFamily.replace(/"/g,"'")+'" font-size="'+fs
+    + '" font-weight="'+cs.fontWeight+'" letter-spacing="'+cs.letterSpacing
+    + '" fill="none" stroke="#000" stroke-width="'+w+'">'+ text.replace(/[&<>]/g,"") + '</text></svg>';
+  const cols = await alphaColumns(svg, W, H);
+  if(!cols) return 0;
+  let max = 0;
+  for(let k=0;k<text.length;k++){
+    if(!text[k].trim()) continue;
+    const a = Math.floor(pad + (k ? bounds[k-1] : 0)), b = Math.min(W, Math.ceil(pad + bounds[k]));
+    let area = 0; for(let x=a;x<b;x++) area += cols[x];
+    max = Math.max(max, area / w * 1.06);          // + joins / self-intersections
+  }
+  return max ? Math.round(max * 1.06) : 0;
+}
+let dashMeasured = false;
+async function measureDash(){
+  if(dashMeasured) return; dashMeasured = true;
+  const lines = Array.prototype.slice.call(document.querySelectorAll("svg.tsvg text"));
+  for(const l of lines){
+    const dash = await glyphDash(l);
+    if(dash) l.style.setProperty("--dash", dash);   // else keep the safe provisional
+  }
+}
+
+/* split paragraphs into masked words for the staggered reveal */
+document.querySelectorAll("[data-words]").forEach(function(el){
+  const words = el.textContent.trim().split(/\s+/);
+  el.textContent = "";
+  words.forEach(function(w,i){
+    const s = document.createElement("span"); s.className = "w";
+    s.style.setProperty("--i", i);
+    const inner = document.createElement("i"); inner.textContent = w;
+    s.appendChild(inner); el.appendChild(s);
+    if(i < words.length-1) el.appendChild(document.createTextNode(" "));
+  });
+});
+
+/* procedural micro-parts: stutter rail + bar field */
+function build(el, n){
+  for(let i=0;i<n;i++){
+    const b = document.createElement("i");
+    b.style.setProperty("--i", i);
+    el.appendChild(b);
+    if(el.classList.contains("rail")) b.style.transform = "scaleY(" + (.16 + ((i*37)%53)/53*.78).toFixed(3) + ")";
+  }
+}
+document.querySelectorAll("[data-rail]").forEach(function(el){ build(el, +el.dataset.rail); });
+document.querySelectorAll("[data-bars]").forEach(function(el){ build(el, +el.dataset.bars); });
+
+/* ===========================================================================
+   C · STATE MACHINE — body carries .state-0 … .state-8.  Nothing else.
+   =========================================================================== */
+const BEATS = ["cold open","the problem","the cause","the shift","the timing",
+               "the system","the compound","the idea","the ask"];
+/* ms after a beat lands that its hero type locks -> sub-thump */
+const LOCK = {1:1250, 2:1180, 3:1800, 4:2150, 5:900, 6:700, 7:1350, 8:1400};
+
+const FLAGS = new Set();
+let state = 0, lockTimer = 0, dialRAF = 0;
+
+const beatTag   = document.getElementById("beatTag");
+const beatNum   = document.getElementById("beatNum");
+const trackFill = document.getElementById("trackFill");
+const sndTag    = document.getElementById("sndTag");
+const dialNum   = document.getElementById("dialNum");
+const ticks     = document.getElementById("ticks");
+for(let i=0;i<8;i++) ticks.appendChild(document.createElement("i"));
+
+function sync(){
+  const cls = Array.from(FLAGS);      /* Set is not array-like: slice() returned [] */
+  cls.push("state-" + state);
+  document.body.className = cls.join(" ");
+}
+function hud(){
+  beatTag.textContent = BEATS[state];
+  beatNum.textContent = (state < 10 ? "0" : "") + state;
+  trackFill.style.transform = "scaleX(" + (state/8) + ")";
+  Array.prototype.forEach.call(ticks.children, function(t,i){ t.classList.toggle("on", i < state); });
+}
+function runDial(){
+  cancelAnimationFrame(dialRAF);
+  if(FLAGS.has("reduced")){ dialNum.textContent = "100"; return; }
+  const t0 = performance.now(), D = 1700;
+  dialNum.textContent = "0";
+  (function step(now){
+    const t = Math.min(1, (now - t0) / D);
+    dialNum.textContent = Math.round((1 - Math.pow(1-t,3)) * 100);
+    if(t < 1) dialRAF = requestAnimationFrame(step);
+  })(t0);
+}
+function go(next){
+  next = Math.max(0, Math.min(8, next|0));
+  if(next === state){ SFX.click(); return; }        /* beat 8 lingers forever */
+  const fwd = next > state;
+  state = next;
+  sync(); hud();
+  LAYERS.forEach(function(l){ l.classList.toggle("is-live", +l.dataset.beat === state); });
+
+  SFX.whoosh();
+  fwd ? SFX.click() : SFX.back();
+  clearTimeout(lockTimer);
+  if(LOCK[state]) lockTimer = setTimeout(function(){ SFX.thump(); }, LOCK[state]);
+  state === 3 ? runDial() : cancelAnimationFrame(dialRAF);
+}
+
+/* ---- input ---- */
+addEventListener("keydown", function(e){
+  if(e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  SFX.init();
+  if(k === " " || k === "ArrowRight" || k === "ArrowDown" || k === "PageDown"){ e.preventDefault(); go(state+1); }
+  else if(k === "ArrowLeft" || k === "ArrowUp" || k === "PageUp"){ e.preventDefault(); go(state-1); }
+  else if(k === "Home" || k === "0"){ e.preventDefault(); go(0); }
+  else if(/^[1-8]$/.test(k)){ e.preventDefault(); go(+k); }
+  else if(k === "m" || k === "M"){
+    const m = SFX.toggle(); if(!m) SFX.click();
+    m ? FLAGS.add("muted") : FLAGS.delete("muted"); sync();
+    sndTag.textContent = "M · sound " + (m ? "off" : "on");
+  }
+  else if(k === "r" || k === "R"){
+    FLAGS.has("reduced") ? FLAGS.delete("reduced") : FLAGS.add("reduced");
+    sync(); if(state === 3) runDial();
+  }
+  else if(k === "g" || k === "G"){ FLAGS.has("grid") ? FLAGS.delete("grid") : FLAGS.add("grid"); sync(); }
+  else if(k === "c" || k === "C"){ FLAGS.has("no-cursor") ? FLAGS.delete("no-cursor") : FLAGS.add("no-cursor"); sync(); }
+  else if(k === "f" || k === "F"){
+    if(document.fullscreenElement) document.exitFullscreen();
+    else if(document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+  }
+});
+document.addEventListener("pointerdown", function(){ SFX.init(); go(state+1); });
+
+/* ---- boot ---- */
+function boot(){ fitAll(); hud(); }
+boot();
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(function(){ fitAll(); measureDash(); });
+addEventListener("resize", fitAll, {passive:true});
 </script>
 </body>
 </html>
