@@ -1,0 +1,321 @@
+/* ===========================================================================
+   CADENCE — film engine.  Inlined into index.html by build.py.
+   ---------------------------------------------------------------------------
+   RENDER CONTRACT
+     Animated properties are transform / opacity / filter / stroke-dashoffset.
+     The only box geometry that animates is .morph (width, height,
+     border-radius, transform) because the "one container, never cuts" rule
+     requires it; nothing inside it reflows and every child is sized in canvas
+     units, so the plate's resize never triggers a subtree relayout cascade.
+   CANVAS UNITS
+     1cqw = 1% of the framed canvas (.frame), never of the raw window.
+     .stage fills the window (ambience + grain bleed edge to edge); .frame is
+     the 16:9-safe composition box inside it, so type never clips on 5:4 or
+     21:9 displays and there is never a black bar.
+   =========================================================================== */
+
+/* ---- 0 · tokens ---------------------------------------------------------- */
+:root{
+  --ink:      #08080A;   /* deep off-black page */
+  --ink-2:    #0E0E11;   /* plate */
+  --ink-3:    #16161A;   /* raised surface */
+  --paper:    #F5F2EB;   /* warm stark white */
+  --dim:      #B7B1A8;
+  --mute:     #7A756D;
+  --hair:     rgba(245,242,235,.10);
+  --hair-2:   rgba(245,242,235,.22);
+  --accent:   #FF4A1C;   /* the one accent */
+  --accent-28:rgba(255,74,28,.28);
+
+  --e:        cubic-bezier(.16,1,.3,1);      /* snap in  */
+  --e-cine:   cubic-bezier(.7,0,.2,1);       /* cine     */
+  --e-soft:   cubic-bezier(.25,.8,.25,1);
+  --e-trace:  cubic-bezier(.42,0,.18,1);     /* pen-stroke reveal */
+
+  --t-sub:    2.2cqw;
+  --pad:      5cqw;      /* plate padding */
+  --gut:      4.5cqw;    /* canvas gutter — chrome aligns to this */
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:#030304; color:var(--paper); overflow:hidden;
+  font-family:Inter,"Helvetica Neue",Helvetica,Arial,"Liberation Sans",system-ui,sans-serif;
+  font-synthesis:none; -webkit-font-smoothing:antialiased; text-rendering:geometricPrecision;
+  user-select:none; -webkit-user-select:none;
+}
+body.no-cursor,body.no-cursor *{cursor:none}
+::selection{background:var(--accent);color:#fff}
+
+/* ---- 1 · viewport -------------------------------------------------------- */
+.viewport{
+  position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+  overflow:hidden; background:#030304;
+  perspective:1900px; perspective-origin:50% 46%;
+}
+.viewport::after{                 /* cinematic gate + vignette */
+  content:""; position:absolute; inset:0; z-index:8; pointer-events:none;
+  background:radial-gradient(120% 90% at 50% 45%,
+    rgba(0,0,0,0) 44%, rgba(0,0,0,.5) 79%, rgba(0,0,0,.86) 100%);
+  mix-blend-mode:multiply;
+}
+
+/* ---- 2 · stage — full-bleed ambience, no letterbox bars ------------------ */
+.stage{position:absolute; inset:0; container-type:size}
+
+.aura{position:absolute; inset:0; z-index:0; overflow:hidden; pointer-events:none}
+.aura::before,.aura::after{content:""; position:absolute; will-change:transform}
+.aura::before{
+  left:-24cqw; top:-34cqw; width:96cqw; height:96cqw;
+  background:radial-gradient(closest-side, rgba(255,74,28,.17), rgba(255,74,28,.05) 55%, rgba(255,74,28,0) 72%);
+  animation:drift-a 34s var(--e-soft) infinite alternate;
+}
+.aura::after{
+  right:-30cqw; bottom:-38cqw; width:108cqw; height:108cqw;
+  background:radial-gradient(closest-side, rgba(245,242,235,.075), rgba(245,242,235,0) 66%);
+  animation:drift-b 46s var(--e-soft) infinite alternate;
+}
+@keyframes drift-a{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(9cqw,6cqw,0) scale(1.14)}}
+@keyframes drift-b{from{transform:translate3d(0,0,0) scale(1.06)}to{transform:translate3d(-7cqw,-5cqw,0) scale(1)}}
+
+.grain{position:absolute; inset:0; z-index:6; pointer-events:none; overflow:hidden}
+.grain::before{
+  content:""; position:absolute; left:-2%; top:-2%; width:104%; height:104%;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.86' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity:.085; mix-blend-mode:overlay; will-change:transform;
+  animation:grain .62s steps(3,end) infinite;
+}
+@keyframes grain{
+  0%  {transform:translate3d(0,0,0)}
+  33% {transform:translate3d(-1.1%,.7%,0)}
+  66% {transform:translate3d(.8%,-1.2%,0)}
+  100%{transform:translate3d(-.5%,-.4%,0)}
+}
+
+/* ---- 3 · frame — the composition box every cqw resolves against ---------- */
+.frame{
+  position:absolute; inset:0; margin:auto; z-index:2;
+  width:min(100cqw, 177.7778cqh);
+  height:min(56.25cqw, 100cqh);
+  container-type:size;
+}
+.guides{
+  position:absolute; inset:0 var(--gut); pointer-events:none; opacity:0;
+  transition:opacity .5s var(--e);
+  background-image:linear-gradient(to right, var(--accent-28) 0 1px, transparent 1px);
+  background-size:calc(100% / 12) 100%;
+  box-shadow:inset 1px 0 0 var(--accent-28), inset -1px 0 0 var(--accent-28);
+}
+body.grid .guides{opacity:1}
+
+/* ---- 4 · camera + morph ------------------------------------------------- */
+.camera{
+  position:absolute; inset:0; transform-style:preserve-3d;
+  transform:translate3d(0,0,0) scale(1);
+  transition:transform 1.15s var(--e-cine);
+  will-change:transform;
+}
+.morph{
+  position:absolute; inset:0; margin:auto;
+  width:88cqw; height:50cqw; transform-style:preserve-3d;
+  transform:translate3d(0,0,0);
+  transition:width 1.05s var(--e-cine), height 1.05s var(--e-cine),
+             border-radius 1.05s var(--e-cine), transform 1.05s var(--e-cine);
+}
+.morph::before{
+  content:""; position:absolute; inset:0; border-radius:inherit;
+  background:var(--plate, var(--ink-2)); opacity:0;
+  box-shadow:
+    0 0 0 1px var(--hair),
+    0 1px 0 0 rgba(245,242,235,.055) inset,
+    0 -1px 0 0 rgba(0,0,0,.55) inset,
+    0 2.4cqw 5cqw -2.4cqw rgba(0,0,0,.82),
+    0 8cqw 15cqw -9cqw rgba(0,0,0,.95),
+    0 0 13cqw -6cqw var(--plate-glow, rgba(255,74,28,0));
+  /* fill + shadows switch at the state boundary: tweening them repaints the
+     whole plate every frame for a second, which costs real frames */
+  transition:opacity .8s var(--e-cine);
+}
+.morph::after{
+  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none; opacity:0;
+  background:radial-gradient(90% 120% at 12% 0%, rgba(245,242,235,.07), rgba(245,242,235,0) 58%);
+  transition:opacity .9s var(--e-cine);
+}
+
+/* ---- 5 · layers --------------------------------------------------------- */
+.layer{
+  position:absolute; inset:0; z-index:3;
+  opacity:0; visibility:hidden; pointer-events:none;
+  transform:translate3d(0,2.4cqw,0);
+  transition:opacity .42s var(--e), transform .8s var(--e), visibility 0s linear .42s;
+}
+.layer.is-live{
+  opacity:1; visibility:visible; transform:translate3d(0,0,0);
+  transition:opacity .5s var(--e), transform 1.05s var(--e), visibility 0s;
+}
+.fx{position:absolute; inset:0; filter:blur(22px); transition:filter .55s var(--e)}
+.layer.is-live .fx{filter:blur(0px)}
+.body{position:absolute; inset:0; padding:var(--pad)}
+
+/* ---- 6 · display type --------------------------------------------------- */
+.dt{
+  fill:var(--paper); fill-opacity:0;
+  stroke:var(--accent); stroke-width:3; stroke-linecap:round; stroke-linejoin:round;
+  stroke-dasharray:var(--dash,2000); stroke-dashoffset:var(--dash,2000);
+  font-weight:800; letter-spacing:-.03em; paint-order:stroke fill;
+  transition:stroke-dashoffset .45s var(--e), fill-opacity .3s var(--e), stroke-width .6s var(--e);
+}
+.layer.is-live .dt{
+  stroke-dashoffset:0; fill-opacity:1; stroke-width:1.1;
+  transition:
+    stroke-dashoffset 1.15s var(--e-trace) calc(var(--d,0) * 105ms + 90ms),
+    fill-opacity .55s var(--e) calc(var(--d,0) * 105ms + 830ms),
+    stroke-width .8s var(--e) calc(var(--d,0) * 105ms + 1150ms);
+}
+.tsvg{display:block; height:auto; overflow:visible}
+.sub{margin:0; max-width:44ch; font-size:var(--t-sub); line-height:1.4; font-weight:450;
+  color:var(--dim); letter-spacing:-.01em}
+.hair{height:1px; background:var(--hair)}
+.num-xl{font-size:13cqw; font-weight:800; letter-spacing:-.05em; font-variant-numeric:tabular-nums; line-height:.82}
+.stat{display:flex; align-items:baseline; gap:.7cqw; line-height:.84}
+.stat b{font-size:8.4cqw; font-weight:800; letter-spacing:-.045em; font-variant-numeric:tabular-nums}
+.stat span{font-size:2.2cqw; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--accent)}
+
+.w{display:inline-block; overflow:hidden; vertical-align:top; padding-bottom:.16em; margin-bottom:-.16em}
+.w>i{display:block; font-style:inherit; font-weight:inherit; color:inherit;
+  transform:translate3d(0,118%,0); opacity:.001;
+  transition:transform .8s var(--e), opacity .5s var(--e)}
+.layer.is-live .w>i{transform:translate3d(0,0,0); opacity:1;
+  transition-delay:calc(var(--i,0) * 62ms + 230ms)}
+
+/* ---- 7 · apparatus ------------------------------------------------------ */
+/* bar field — stepped vs smooth, the same shape twice */
+.bars{display:flex; align-items:flex-end; gap:.75cqw; height:13cqw}
+.bars i{width:1.5cqw; height:100%; transform-origin:bottom center; transform:scaleY(.15); border-radius:.1cqw}
+.bars.jank i{background:var(--accent); opacity:.55}
+.layer.is-live .bars.jank i{animation:jank 1.05s steps(4,end) infinite alternate; animation-delay:calc(var(--i) * -67ms)}
+@keyframes jank{from{transform:scaleY(.16)}to{transform:scaleY(.94)}}
+
+/* dial — the plate rim itself fills */
+.dial{position:absolute; inset:0; display:block; overflow:visible}
+.dial circle{fill:none; transform-box:fill-box; transform-origin:50% 50%}
+.dial .trk{stroke:var(--hair-2); stroke-width:1.1}
+.dial .fil{stroke:var(--accent); stroke-width:1.6; stroke-linecap:round; transform:rotate(-90deg);
+  stroke-dasharray:100; stroke-dashoffset:100; transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .dial .fil{stroke-dashoffset:0; transition:stroke-dashoffset 1.7s var(--e-cine) .18s}
+.dial-core{position:absolute; inset:18%; display:flex; align-items:center; justify-content:center}
+
+/* easing curve — the dot traces the real bezier */
+.curve{position:relative; width:32cqw; height:21cqw}
+.curve svg{position:absolute; inset:0; width:100%; height:100%; overflow:visible}
+.curve .axis{stroke:var(--hair-2); stroke-width:1; fill:none}
+.curve .path{fill:none; stroke:var(--paper); stroke-width:4.5; stroke-linecap:round;
+  stroke-dasharray:100; stroke-dashoffset:100; transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .curve .path{stroke-dashoffset:0; transition:stroke-dashoffset 1.5s var(--e-cine) .35s}
+.curve .dot{fill:var(--accent); stroke:var(--paper); stroke-width:2.5}
+.layer.is-live .curve .dot{animation:travel 1.9s var(--e-soft) .35s both}
+@keyframes travel{
+  0%   {transform:translate(0,0)}
+  12.5%{transform:translate(26.4px,-7.7px)}
+  25%  {transform:translate(53.9px,-28.1px)}
+  37.5%{transform:translate(83.5px,-57px)}
+  50%  {transform:translate(116.3px,-90px)}
+  62.5%{transform:translate(153.2px,-123.1px)}
+  75%  {transform:translate(195.5px,-151.9px)}
+  87.5%{transform:translate(244px,-172.3px)}
+  100% {transform:translate(300px,-180px)}
+}
+
+/* primitive glyphs — word and glyph, nothing else */
+.prims{display:grid; grid-template-columns:repeat(4,1fr); gap:3cqw}
+.prim{display:flex; flex-direction:column; gap:2cqw; padding-top:2cqw; border-top:1px solid var(--hair-2)}
+.prim svg{width:7cqw; height:7cqw; overflow:visible}
+.prim path,.prim circle,.prim line{fill:none; stroke:var(--accent); stroke-width:5.5;
+  stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:100; stroke-dashoffset:100;
+  transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .prim path,.layer.is-live .prim circle,.layer.is-live .prim line{
+  stroke-dashoffset:0; transition:stroke-dashoffset 1.05s var(--e) calc(var(--i) * 130ms + 650ms)}
+.prim b{font-size:2.6cqw; font-weight:800; letter-spacing:-.015em}
+
+/* 3D orbit */
+.orbit{position:absolute; inset:0; transform-style:preserve-3d; transform:translateZ(0)}
+.core{position:absolute; left:50%; top:50%; width:10cqw; height:10cqw; margin:-5cqw 0 0 -5cqw; border-radius:50%;
+  background:var(--accent); box-shadow:0 0 8cqw -1cqw rgba(255,74,28,.6);
+  animation:pulse 3.4s var(--e-soft) infinite alternate}
+@keyframes pulse{from{transform:scale(.86);opacity:.78}to{transform:scale(1.06);opacity:1}}
+.icard{position:absolute; width:24cqw; padding:2cqw 2.1cqw; border-radius:1cqw;
+  background:rgba(20,20,24,.94); border-top:2px solid var(--accent);
+  box-shadow:0 2.2cqw 4.5cqw -2.2cqw rgba(0,0,0,.9), inset 0 1px 0 rgba(245,242,235,.06)}
+.icard b{display:block; font-size:2.1cqw; font-weight:800; line-height:1.14; letter-spacing:-.015em}
+.icard:nth-child(1){left:-12cqw; top:-3cqw; animation:f1 11s var(--e-soft) infinite alternate}
+.icard:nth-child(2){left:-9cqw;  bottom:-4cqw; animation:f2 13s var(--e-soft) infinite alternate}
+.icard:nth-child(3){right:-12cqw;top:-4cqw; animation:f3 12s var(--e-soft) infinite alternate}
+.icard:nth-child(4){right:-9cqw; bottom:-4cqw; animation:f4 14s var(--e-soft) infinite alternate}
+@keyframes f1{from{transform:rotateY(23deg) rotateX(5deg) translate3d(0,0,4cqw)}to{transform:rotateY(29deg) rotateX(1deg) translate3d(0,-1.6cqw,8cqw)}}
+@keyframes f2{from{transform:rotateY(19deg) rotateX(-6deg) translate3d(0,0,7cqw)}to{transform:rotateY(24deg) rotateX(-1deg) translate3d(0,1.4cqw,3cqw)}}
+@keyframes f3{from{transform:rotateY(-21deg) rotateX(-4deg) translate3d(0,0,9cqw)}to{transform:rotateY(-27deg) rotateX(2deg) translate3d(0,-1.4cqw,4cqw)}}
+@keyframes f4{from{transform:rotateY(-17deg) rotateX(6deg) translate3d(0,0,3cqw)}to{transform:rotateY(-23deg) rotateX(1deg) translate3d(0,1.6cqw,8cqw)}}
+
+/* logo lockup */
+.halo{position:absolute; left:50%; top:50%; width:56cqw; height:56cqw; margin:-28cqw 0 0 -28cqw; border-radius:50%;
+  background:radial-gradient(closest-side, rgba(255,74,28,.5), rgba(255,74,28,.08) 58%, rgba(255,74,28,0) 76%);
+  filter:blur(1.2cqw); animation:breathe 5s var(--e-soft) infinite alternate}
+@keyframes breathe{from{transform:scale(.9) translateZ(0);opacity:.5}to{transform:scale(1.07) translateZ(0);opacity:1}}
+.lockmark{position:absolute; left:50%; top:50%; width:15cqw; height:15cqw; margin:-7.5cqw 0 0 -7.5cqw}
+.lockmark svg{width:100%; height:100%; display:block; overflow:visible}
+.lockmark circle,.lockmark path{fill:none; stroke-dasharray:100; stroke-dashoffset:100;
+  transition:stroke-dashoffset .4s var(--e)}
+.layer.is-live .lockmark circle{stroke-dashoffset:0; transition:stroke-dashoffset 1.4s var(--e-cine) .1s}
+.layer.is-live .lockmark path{stroke-dashoffset:0; transition:stroke-dashoffset 1.2s var(--e-cine) .35s}
+.lock-word{position:absolute; left:50%; top:calc(50% + 8cqw); width:34cqw; margin-left:-17cqw}
+.thesis{position:absolute; left:50%; top:calc(50% + 17cqw); width:44cqw; margin-left:-22cqw}
+
+/* CTA */
+.cta{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:2cqw; padding:3cqw}
+.cta-btn{display:inline-flex; align-items:center; gap:1.2cqw; padding:1.6cqw 3cqw; border-radius:99px;
+  background:var(--accent); color:#180700; font-size:1.8cqw; font-weight:800;
+  letter-spacing:.1em; text-transform:uppercase;
+  box-shadow:0 2.4cqw 5cqw -2cqw rgba(255,74,28,.55), inset 0 1px 0 rgba(255,255,255,.42);
+  transition:transform .5s var(--e), box-shadow .5s var(--e)}
+.cta-btn:hover{transform:translate3d(0,-.6cqw,0) scale(1.02);
+  box-shadow:0 3.4cqw 6cqw -2cqw rgba(255,74,28,.7), inset 0 1px 0 rgba(255,255,255,.5)}
+.cta-btn svg{width:1.9cqw; height:1.9cqw}
+.url{font-size:1.9cqw; letter-spacing:.2em; text-transform:uppercase; font-weight:750}
+
+/* cold open */
+.poster{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:2.4cqw; text-align:center; padding:var(--pad)}
+.poster .mark{font-size:3.2cqw; font-weight:800; letter-spacing:.6em; text-indent:.6em; opacity:.92}
+.poster .go{font-size:1.7cqw; letter-spacing:.42em; text-transform:uppercase; color:var(--accent); font-weight:700}
+.poster .k{font-size:1.3cqw; letter-spacing:.22em; text-transform:uppercase; color:var(--mute); line-height:2.2}
+.poster .k b{color:var(--paper); font-weight:700}
+.blink{animation:blink 1.7s steps(2,end) infinite}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:.25}}
+
+/* ---- 8 · chrome — brand + beat tag + counter.  No progress bar. ---------- */
+.chrome{position:absolute; inset:0; z-index:7; pointer-events:none; font-weight:650;
+  transition:opacity .8s var(--e)}
+.chrome>div{position:absolute}
+body.state-0 .chrome,body.state-last .chrome{opacity:.6}
+.brand{left:var(--gut); top:3.4cqw; font-size:1.5cqw; letter-spacing:.4em; font-weight:750}
+.brand::after{content:""; display:inline-block; width:.5cqw; height:.5cqw; margin-left:1cqw;
+  background:var(--accent); border-radius:50%; vertical-align:middle; transform:translateY(-.1cqw)}
+.beat-tag{left:50%; top:3.5cqw; transform:translateX(-50%); font-size:1.35cqw; letter-spacing:.32em;
+  text-transform:uppercase; color:var(--mute)}
+.meter{right:var(--gut); top:2.9cqw; display:flex; align-items:baseline; gap:.7cqw; font-variant-numeric:tabular-nums}
+.meter b{font-size:2.6cqw; font-weight:800; letter-spacing:-.02em}
+.meter em{font-style:normal; font-size:1.3cqw; color:var(--mute); letter-spacing:.14em}
+
+/* ---- 9 · reduced motion — honest, and demoable live with R --------------- */
+body.reduced .aura::before,body.reduced .aura::after,body.reduced .grain::before,
+body.reduced .bars i,body.reduced .halo,body.reduced .core,
+body.reduced .icard,body.reduced .blink{animation:none!important}
+body.reduced *{transition-duration:.2s!important;transition-delay:0s!important}
+body.reduced .fx{filter:none!important}
+body.reduced .dt{stroke-dashoffset:0!important;fill-opacity:1!important;stroke-width:1.1!important}
+body.reduced .w>i{transform:none!important;opacity:1!important}
+body.reduced .dial .fil{stroke-dashoffset:0!important}
+body.reduced .curve .path{stroke-dashoffset:0!important}
+body.reduced .prim path,body.reduced .prim circle,body.reduced .prim line{stroke-dashoffset:0!important}
+body.reduced .lockmark circle,body.reduced .lockmark path{stroke-dashoffset:0!important}
